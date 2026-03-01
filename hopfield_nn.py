@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -19,6 +20,7 @@ DEFAULT_RECALL_TEST_FOLDER = "noisy_patterns"
 
 
 def _set_window_title(fig, window_title: str | None) -> None:
+    """Set matplotlib window title when backend supports it."""
     manager = getattr(fig.canvas, "manager", None)
     if manager is None or not window_title:
         return
@@ -35,6 +37,7 @@ def _show_gallery_window_process(
     window_title: str | None,
     use_binary_colormap: bool,
 ) -> None:
+    """Render up to 8 images in a 2x4 gallery in a child process."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap
 
@@ -72,6 +75,7 @@ def show_gallery_window(
     window_title: str | None = None,
     use_binary_colormap: bool = False,
 ) -> None:
+    """Start a process that shows a gallery window."""
     context = get_context("spawn")
     process = context.Process(
         target=_show_gallery_window_process,
@@ -106,7 +110,7 @@ class HopfieldNetwork:
         return np.where(values >= 0, 1, -1)
 
     def train_hebbian(self, patterns: list[np.ndarray], label: str = "HEBB") -> None:
-        """Batch Hebbian update."""
+        """Train weights using batch Hebbian learning."""
         self.weights.fill(0)
         for index, pattern in enumerate(patterns, start=1):
             self.weights += np.outer(pattern, pattern)
@@ -117,7 +121,7 @@ class HopfieldNetwork:
         print(f"[{label}] Hebbian training complete.")
 
     def train_storkey(self, patterns: list[np.ndarray], label: str = "STORK") -> None:
-        """Storkey learning rule."""
+        """Train weights using the Storkey learning rule."""
         self.weights.fill(0)
         n = self.size
 
@@ -136,7 +140,7 @@ class HopfieldNetwork:
         print(f"[{label}] Storkey training complete.")
 
     def train_pseudo_inverse(self, patterns: list[np.ndarray], label: str = "PINV") -> None:
-        """Pseudo-inverse learning rule."""
+        """Train weights using the pseudo-inverse learning rule."""
         if not patterns:
             self.weights.fill(0)
             return
@@ -511,8 +515,197 @@ def format_error_cell(incorrect_count: int, incorrect_percent: float) -> str:
     return f"{incorrect_count} ({incorrect_percent:.1f}%)"
 
 
+def read_repeat_count() -> int:
+    """Read how many repeated recall runs to execute for Option 6."""
+    while True:
+        value = input("Number of repeats [10]: ").strip()
+        if value == "":
+            return 10
+        if value.isdigit() and int(value) > 0:
+            return int(value)
+        print("Invalid input: enter a positive integer.")
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    """Return numerator/denominator, or 0 when denominator is 0."""
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def _binary_confusion_counts(reference: np.ndarray, predicted: np.ndarray) -> tuple[int, int, int, int]:
+    """Return TP, FP, FN, TN counts for binary grids where 1 is the positive class."""
+    tp = int(np.count_nonzero((predicted == 1) & (reference == 1)))
+    fp = int(np.count_nonzero((predicted == 1) & (reference == 0)))
+    fn = int(np.count_nonzero((predicted == 0) & (reference == 1)))
+    tn = int(np.count_nonzero((predicted == 0) & (reference == 0)))
+    return tp, fp, fn, tn
+
+
+def _format_float_cell(value: float, width: int = 10) -> str:
+    """Format metric values with fixed width for terminal table readability."""
+    return f"{value:>{width}.4f}"
+
+
+def run_repeat_recall_report() -> None:
+    """Run repeated recalls and print aggregate error and average metric report in terminal."""
+    print("\n=== Repeat Recall Report ===")
+    folder_input = input(f"Folder to test [{DEFAULT_RECALL_TEST_FOLDER}]: ").strip()
+    test_folder = Path(folder_input) if folder_input else Path(DEFAULT_RECALL_TEST_FOLDER)
+
+    if not test_folder.is_absolute():
+        test_folder = Path(__file__).resolve().parent / test_folder
+
+    if not test_folder.exists() or not test_folder.is_dir():
+        print(f"Folder not found: {test_folder}")
+        return
+
+    repeat_count = read_repeat_count()
+
+    hops_network = load_network_from_file(HOPS_MODEL_PATH)
+    if hops_network is None:
+        print("Trained HOPS model not found or invalid. Run option 3 first.")
+        return
+
+    hopa_network = load_network_from_file(HOPA_MODEL_PATH)
+    if hopa_network is None:
+        print("Trained HOPA model not found or invalid. Run option 3 first.")
+        return
+
+    test_files = sorted(
+        test_folder.glob("*.png"),
+        key=lambda file_path: file_path.stat().st_mtime,
+        reverse=True,
+    )[:8]
+
+    if not test_files:
+        print(f"No PNG images found in: {test_folder}")
+        return
+
+    patterns_folder = ensure_patterns_dir()
+    test_cases: list[tuple[str, np.ndarray, np.ndarray]] = []
+
+    for test_file in test_files:
+        noisy_grid = load_pattern_image(test_file)
+        if noisy_grid is None:
+            print(f"Skipping {test_file.name}: expected {GRID_COLS}x{GRID_ROWS} binary pattern PNG.")
+            continue
+
+        reference_stem = infer_reference_pattern_stem(test_file.stem)
+        reference_path = patterns_folder / f"{reference_stem}.png"
+        reference_grid = load_pattern_image(reference_path)
+        if reference_grid is None:
+            print(f"Skipping {test_file.name}: reference pattern not found/invalid ({reference_path.name}).")
+            continue
+
+        test_cases.append(
+            (
+                test_file.name,
+                grid_to_bipolar_vector(noisy_grid),
+                np.asarray(reference_grid, dtype=np.uint8),
+            )
+        )
+
+    if not test_cases:
+        print("No valid files to report.")
+        return
+
+    model_totals: dict[str, dict[str, float]] = {
+        "HOPA": {"errors": 0.0, "tp": 0.0, "fp": 0.0, "fn": 0.0, "tn": 0.0},
+        "HOPS": {"errors": 0.0, "tp": 0.0, "fp": 0.0, "fn": 0.0, "tn": 0.0},
+    }
+    per_repeat_errors: dict[str, list[float]] = {"HOPA": [], "HOPS": []}
+
+    for _ in range(repeat_count):
+        hops_repeat_errors = 0.0
+        hopa_repeat_errors = 0.0
+
+        for _, noisy_vector, reference_array in test_cases:
+            hops_recalled = hops_network.recall_synchronous(noisy_vector, steps=1)
+            hopa_recalled = hopa_network.recall_asynchronous(noisy_vector, steps=1)
+
+            hops_grid = bipolar_vector_to_grid(hops_recalled)
+            hopa_grid = bipolar_vector_to_grid(hopa_recalled)
+
+            hops_errors = int(np.count_nonzero(hops_grid != reference_array))
+            hopa_errors = int(np.count_nonzero(hopa_grid != reference_array))
+
+            model_totals["HOPS"]["errors"] += hops_errors
+            model_totals["HOPA"]["errors"] += hopa_errors
+            hops_repeat_errors += hops_errors
+            hopa_repeat_errors += hopa_errors
+
+            hops_tp, hops_fp, hops_fn, hops_tn = _binary_confusion_counts(reference_array, hops_grid)
+            hopa_tp, hopa_fp, hopa_fn, hopa_tn = _binary_confusion_counts(reference_array, hopa_grid)
+
+            model_totals["HOPS"]["tp"] += hops_tp
+            model_totals["HOPS"]["fp"] += hops_fp
+            model_totals["HOPS"]["fn"] += hops_fn
+            model_totals["HOPS"]["tn"] += hops_tn
+
+            model_totals["HOPA"]["tp"] += hopa_tp
+            model_totals["HOPA"]["fp"] += hopa_fp
+            model_totals["HOPA"]["fn"] += hopa_fn
+            model_totals["HOPA"]["tn"] += hopa_tn
+
+        per_repeat_errors["HOPS"].append(hops_repeat_errors)
+        per_repeat_errors["HOPA"].append(hopa_repeat_errors)
+
+    total_images_evaluated = repeat_count * len(test_cases)
+    total_pixels_evaluated = total_images_evaluated * NEURON_COUNT
+
+    print(f"Repeats: {repeat_count}")
+    print(f"Files used: {len(test_cases)} (up to 8)")
+    print(f"Images evaluated: {total_images_evaluated}")
+    print(f"Pixels evaluated per model: {total_pixels_evaluated}")
+    print(f"Test Folder: {test_folder}")
+    print()
+
+    model_col_width = len("Model")
+    avg_err_col_title = "Avg. ± SD"
+    avg_err_col_width = len(avg_err_col_title)
+
+    avg_error_texts: dict[str, str] = {}
+    for model_name in ("HOPA", "HOPS"):
+        repeat_errors = np.asarray(per_repeat_errors[model_name], dtype=float)
+        avg_errors = float(np.mean(repeat_errors))
+        std_errors = float(np.std(repeat_errors))
+        avg_text = f"{avg_errors:.2f} ± {std_errors:.2f}"
+        avg_error_texts[model_name] = avg_text
+        avg_err_col_width = max(avg_err_col_width, len(avg_text))
+
+    header = (
+        f"{'Model':<{model_col_width}}  "
+        f"{avg_err_col_title:>{avg_err_col_width}}  "
+        f"{'P':>10}  {'R':>10}  {'S':>10}  {'F':>10}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for model_name in ("HOPA", "HOPS"):
+        totals = model_totals[model_name]
+        tp = totals["tp"]
+        fp = totals["fp"]
+        fn = totals["fn"]
+        tn = totals["tn"]
+
+        precision = _safe_div(tp, tp + fp)
+        recall = _safe_div(tp, tp + fn)
+        specificity = _safe_div(tn, tn + fp)
+        f_score = _safe_div(2 * precision * recall, precision + recall)
+        avg_error_text = avg_error_texts[model_name]
+
+        print(
+            f"{model_name:<{model_col_width}}  "
+            f"{avg_error_text:>{avg_err_col_width}}  "
+            f"{_format_float_cell(precision)}  "
+            f"{_format_float_cell(recall)}  "
+            f"{_format_float_cell(specificity)}  "
+            f"{_format_float_cell(f_score)}"
+        )
+
 def run_recall_error_report() -> None:
-    """Print per-file recalled pixel error count and percent using latest persisted recall snapshot."""
+    """Print per-file recall error counts/percentages from the latest snapshot."""
     print("\n=== Recall Error Report ===")
     snapshot = load_recent_recall_snapshot()
     if snapshot is None:
@@ -523,12 +716,14 @@ def run_recall_error_report() -> None:
     hopa_meta = load_model_metadata(HOPA_MODEL_PATH)
 
     test_folder = Path(str(snapshot["test_folder"]))
-    file_names = list(snapshot["file_names"])
+    file_names = cast(list[str], snapshot["file_names"])
     hops_recalled = np.asarray(snapshot["hops_recalled"], dtype=np.uint8)
     hopa_recalled = np.asarray(snapshot["hopa_recalled"], dtype=np.uint8)
 
     patterns_folder = ensure_patterns_dir()
     rows: list[tuple[str, str, str]] = []
+    total_hopa_incorrect = 0
+    total_hops_incorrect = 0
 
     for index, file_name in enumerate(file_names):
         reference_stem = infer_reference_pattern_stem(Path(file_name).stem)
@@ -547,6 +742,8 @@ def run_recall_error_report() -> None:
 
         hops_percent = (hops_incorrect / NEURON_COUNT) * 100.0
         hopa_percent = (hopa_incorrect / NEURON_COUNT) * 100.0
+        total_hopa_incorrect += hopa_incorrect
+        total_hops_incorrect += hops_incorrect
 
         rows.append(
             (
@@ -560,9 +757,12 @@ def run_recall_error_report() -> None:
         print("No valid files to report.")
         return
 
-    file_col_width = max(len("File"), max(len(row[0]) for row in rows))
-    hopa_col_width = max(len("HOPA"), max(len(row[1]) for row in rows))
-    hops_col_width = max(len("HOPS"), max(len(row[2]) for row in rows))
+    total_hopa_text = str(total_hopa_incorrect)
+    total_hops_text = str(total_hops_incorrect)
+
+    file_col_width = max(len("File"), len("TOTAL"), max(len(row[0]) for row in rows))
+    hopa_col_width = max(len("HOPA"), len(total_hopa_text), max(len(row[1]) for row in rows))
+    hops_col_width = max(len("HOPS"), len(total_hops_text), max(len(row[2]) for row in rows))
 
     print("NN Status")
     if hops_meta is not None:
@@ -588,15 +788,18 @@ def run_recall_error_report() -> None:
         print("HOPA: trained (metadata unavailable)")
 
     print(f"Test Folder: {test_folder}")
+
     header = f"{'File':<{file_col_width}}  {'HOPA':>{hopa_col_width}}  {'HOPS':>{hops_col_width}}"
     print(header)
     print("-" * len(header))
     for file_name, hopa_text, hops_text in rows:
         print(f"{file_name:<{file_col_width}}  {hopa_text:>{hopa_col_width}}  {hops_text:>{hops_col_width}}")
+    print("-" * len(header))
+    print(f"{'TOTAL':<{file_col_width}}  {total_hopa_text:<{hopa_col_width}}  {total_hops_text:<{hops_col_width}}")
 
 
 def run_hopfield_training() -> None:
-    """Prompt for folder and train Hopfield model in sync + async modes."""
+    """Train and save synchronous/asynchronous Hopfield models from PNG patterns."""
     print("\n=== Hopfield Training ===")
     default_folder = ensure_patterns_dir()
     folder_input = input(f"Training folder [{default_folder.name}]: ").strip()

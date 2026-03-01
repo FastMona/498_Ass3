@@ -2,26 +2,29 @@ from create_img import run_create_image
 from create_img import ensure_patterns_dir
 from noise import run_create_noisy_patterns
 from cleanup import run_cleanup
-from hopfield_nn import run_hopfield_training, get_trained_model_labels, run_pattern_recall, run_recall_error_report
+from hopfield_nn import run_hopfield_training, get_trained_model_labels, run_pattern_recall, run_recall_error_report, run_repeat_recall_report
 from terminal_out import install_terminal_output_logger
 from pathlib import Path
 import torch
 
 
 def show_menu() -> None:
+    """Print the main dashboard menu."""
     print("\n=== Image Dashboard ===")
-    print("1. Create/Save or Edit a pattern")
-    print("2. Create/Save and View Noisy Patterns")
-    print("3. Train Hopfield network")
-    print("4. Pattern Recall and View")
-    print("5. Recall Error Report")
-    for option in range(6, 9):
+    print("1. Patterns (10x12) Create/Save/Edit and View")
+    print("2. Noisy Patterns Create/Save/Edit and View")
+    print("3. Train Hopfield Networks (HOPS, HOPA)")
+    print("4. Recall of Noisy Paterns and View")
+    print("5. Error Report")
+    print("6. Repeat Recall Report")
+    for option in range(7, 9):
         print(f"{option}. Not implemented")
     print("9. Clean up")
     print("0. Exit")
 
 
 def show_startup_status() -> None:
+    """Print current environment and model/pattern status."""
     patterns_folder = ensure_patterns_dir()
     pattern_count = len(list(patterns_folder.glob("*.png")))
 
@@ -46,6 +49,7 @@ def show_startup_status() -> None:
 
 
 def main() -> None:
+    """Run the interactive dashboard loop until user exits."""
     while True:
         show_startup_status()
         show_menu()
@@ -61,12 +65,14 @@ def main() -> None:
             run_pattern_recall()
         elif choice == "5":
             run_recall_error_report()
+        elif choice == "6":
+            run_repeat_recall_report()
         elif choice == "9":
             run_cleanup()
         elif choice == "0":
             print("Goodbye.")
             break
-        elif choice.isdigit() and 6 <= int(choice) <= 8:
+        elif choice.isdigit() and 7 <= int(choice) <= 8:
             print("This option is not implemented yet.")
         else:
             print("Invalid choice. Please enter 0 or 1-9.")

@@ -7,6 +7,8 @@ import sys
 
 
 class _TeeTextStream:
+    """Mirror writes to both the original stream and a log file stream."""
+
     def __init__(self, original_stream, log_stream) -> None:
         self._original_stream = original_stream
         self._log_stream = log_stream
@@ -29,6 +31,7 @@ class _TeeTextStream:
 
 
 def install_terminal_output_logger(log_filename: str = "terminal_out.txt") -> Path:
+    """Redirect stdout/stderr to both console and a workspace log file."""
     workspace_dir = Path(__file__).resolve().parent
     log_path = workspace_dir / log_filename
 

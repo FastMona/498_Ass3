@@ -15,6 +15,7 @@ GRID_COLS = 10
 
 
 def _set_window_title(fig, window_title: str | None) -> None:
+    """Set matplotlib window title when backend supports it."""
     manager = getattr(fig.canvas, "manager", None)
     if manager is None or not window_title:
         return
@@ -25,6 +26,7 @@ def _set_window_title(fig, window_title: str | None) -> None:
 
 
 def _show_grid_window_process(grid: np.ndarray, title: str, window_title: str | None) -> None:
+    """Render one binary grid in a dedicated child process."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap
 
@@ -49,6 +51,7 @@ def _show_gallery_window_process(
     suptitle: str,
     window_title: str | None,
 ) -> None:
+    """Render up to 8 images in a 2x4 gallery in a child process."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap
 
@@ -77,6 +80,7 @@ def _show_gallery_window_process(
 
 
 def show_grid_window(grid: np.ndarray, title: str, window_title: str | None = None) -> None:
+    """Start a process that shows a single grid window."""
     context = get_context("spawn")
     process = context.Process(
         target=_show_grid_window_process,
@@ -92,6 +96,7 @@ def show_gallery_window(
     suptitle: str,
     window_title: str | None = None,
 ) -> None:
+    """Start a process that shows a gallery window."""
     context = get_context("spawn")
     process = context.Process(
         target=_show_gallery_window_process,
