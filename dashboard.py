@@ -2,7 +2,7 @@ from create_img import run_create_image
 from create_img import ensure_patterns_dir
 from noise import run_create_noisy_patterns
 from cleanup import run_cleanup
-from hopfield_nn import run_hopfield_training, get_trained_model_labels, run_pattern_recall
+from hopfield_nn import run_hopfield_training, get_trained_model_labels, run_pattern_recall, run_recall_error_report
 from terminal_out import install_terminal_output_logger
 from pathlib import Path
 import torch
@@ -14,7 +14,8 @@ def show_menu() -> None:
     print("2. Create/Save and View Noisy Patterns")
     print("3. Train Hopfield network")
     print("4. Pattern Recall and View")
-    for option in range(5, 9):
+    print("5. Recall Error Report")
+    for option in range(6, 9):
         print(f"{option}. Not implemented")
     print("9. Clean up")
     print("0. Exit")
@@ -58,12 +59,14 @@ def main() -> None:
             run_hopfield_training()
         elif choice == "4":
             run_pattern_recall()
+        elif choice == "5":
+            run_recall_error_report()
         elif choice == "9":
             run_cleanup()
         elif choice == "0":
             print("Goodbye.")
             break
-        elif choice.isdigit() and 5 <= int(choice) <= 8:
+        elif choice.isdigit() and 6 <= int(choice) <= 8:
             print("This option is not implemented yet.")
         else:
             print("Invalid choice. Please enter 0 or 1-9.")

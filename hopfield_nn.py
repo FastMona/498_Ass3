@@ -11,6 +11,7 @@ from terminal_out import install_terminal_output_logger
 MODELS_DIR = Path(__file__).resolve().parent / "nn_models"
 HOPS_MODEL_PATH = MODELS_DIR / "HOPS.npz"
 HOPA_MODEL_PATH = MODELS_DIR / "HOPA.npz"
+LAST_RECALL_SNAPSHOT_PATH = MODELS_DIR / "LAST_RECALL_SNAPSHOT.npz"
 NEURON_COUNT = GRID_ROWS * GRID_COLS
 DEFAULT_ACTIVATION = "tan"
 DEFAULT_LEARNING_MODE = "hebbian"
@@ -332,6 +333,93 @@ def load_network_from_file(model_path: Path) -> HopfieldNetwork | None:
     return network
 
 
+def load_model_metadata(model_path: Path) -> dict[str, str] | None:
+    """Load display metadata for a saved model file."""
+    if not model_path.exists():
+        return None
+
+    try:
+        data = np.load(model_path, allow_pickle=True)
+    except OSError:
+        return None
+
+    try:
+        size = int(data["size"])
+        activation = str(data["activation"])
+    except KeyError:
+        return None
+
+    learning_mode = str(data["learning_mode"]) if "learning_mode" in data else "unknown"
+    pattern_count = str(int(data["pattern_count"])) if "pattern_count" in data else "unknown"
+    training_folder = str(data["training_folder"]) if "training_folder" in data else "unknown"
+
+    return {
+        "size": str(size),
+        "activation": activation,
+        "learning_mode": learning_mode,
+        "pattern_count": pattern_count,
+        "training_folder": training_folder,
+    }
+
+
+def save_recent_recall_snapshot(
+    test_folder: Path,
+    valid_files: list[Path],
+    hops_recalled_grids: list[np.ndarray],
+    hopa_recalled_grids: list[np.ndarray],
+) -> None:
+    """Persist latest recall outputs for downstream Option 5 analysis."""
+    ensure_models_dir()
+
+    if not valid_files:
+        return
+
+    file_names = np.asarray([file_path.name for file_path in valid_files], dtype=str)
+    hops_array = np.stack([np.asarray(grid, dtype=np.uint8) for grid in hops_recalled_grids], axis=0)
+    hopa_array = np.stack([np.asarray(grid, dtype=np.uint8) for grid in hopa_recalled_grids], axis=0)
+
+    np.savez(
+        LAST_RECALL_SNAPSHOT_PATH,
+        test_folder=str(test_folder),
+        file_names=file_names,
+        hops_recalled=hops_array,
+        hopa_recalled=hopa_array,
+    )
+
+
+def load_recent_recall_snapshot() -> dict[str, object] | None:
+    """Load latest persisted recall outputs for Option 5 analysis."""
+    if not LAST_RECALL_SNAPSHOT_PATH.exists():
+        return None
+
+    try:
+        data = np.load(LAST_RECALL_SNAPSHOT_PATH, allow_pickle=True)
+    except OSError:
+        return None
+
+    required_keys = {"test_folder", "file_names", "hops_recalled", "hopa_recalled"}
+    if not required_keys.issubset(set(data.files)):
+        return None
+
+    file_names = [str(name) for name in np.asarray(data["file_names"]).tolist()]
+    hops_recalled = np.asarray(data["hops_recalled"], dtype=np.uint8)
+    hopa_recalled = np.asarray(data["hopa_recalled"], dtype=np.uint8)
+
+    if hops_recalled.ndim != 3 or hopa_recalled.ndim != 3:
+        return None
+    if hops_recalled.shape != hopa_recalled.shape:
+        return None
+    if hops_recalled.shape[0] != len(file_names):
+        return None
+
+    return {
+        "test_folder": str(data["test_folder"]),
+        "file_names": file_names,
+        "hops_recalled": hops_recalled,
+        "hopa_recalled": hopa_recalled,
+    }
+
+
 def display_recalled_patterns(test_files: list[Path], recalled_grids: list[np.ndarray], model_name: str) -> None:
     """Display recalled images in a 2x4 figure."""
     image_titles = [test_file.stem for test_file in test_files]
@@ -404,8 +492,107 @@ def run_pattern_recall() -> None:
         print("No valid patterns to recall.")
         return
 
+    save_recent_recall_snapshot(test_folder, valid_files, hops_recalled_grids, hopa_recalled_grids)
+    print(f"Saved latest recall snapshot for Option 5: {LAST_RECALL_SNAPSHOT_PATH.name}")
+
     display_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
     display_recalled_patterns(valid_files, hopa_recalled_grids, "HOPA")
+
+
+def infer_reference_pattern_stem(test_file_stem: str) -> str:
+    """Infer source pattern stem; noisy files use nXX_<source_stem> naming."""
+    if test_file_stem.startswith("n") and "_" in test_file_stem:
+        return test_file_stem.split("_", 1)[1]
+    return test_file_stem
+
+
+def format_error_cell(incorrect_count: int, incorrect_percent: float) -> str:
+    """Format one cell as count and percent for terminal table output."""
+    return f"{incorrect_count} ({incorrect_percent:.1f}%)"
+
+
+def run_recall_error_report() -> None:
+    """Print per-file recalled pixel error count and percent using latest persisted recall snapshot."""
+    print("\n=== Recall Error Report ===")
+    snapshot = load_recent_recall_snapshot()
+    if snapshot is None:
+        print("No recall snapshot available. Run option 4 first.")
+        return
+
+    hops_meta = load_model_metadata(HOPS_MODEL_PATH)
+    hopa_meta = load_model_metadata(HOPA_MODEL_PATH)
+
+    test_folder = Path(str(snapshot["test_folder"]))
+    file_names = list(snapshot["file_names"])
+    hops_recalled = np.asarray(snapshot["hops_recalled"], dtype=np.uint8)
+    hopa_recalled = np.asarray(snapshot["hopa_recalled"], dtype=np.uint8)
+
+    patterns_folder = ensure_patterns_dir()
+    rows: list[tuple[str, str, str]] = []
+
+    for index, file_name in enumerate(file_names):
+        reference_stem = infer_reference_pattern_stem(Path(file_name).stem)
+        reference_path = patterns_folder / f"{reference_stem}.png"
+        reference_grid = load_pattern_image(reference_path)
+        if reference_grid is None:
+            print(f"Skipping {file_name}: reference pattern not found/invalid ({reference_path.name}).")
+            continue
+
+        hops_recalled_grid = np.asarray(hops_recalled[index], dtype=np.uint8)
+        hopa_recalled_grid = np.asarray(hopa_recalled[index], dtype=np.uint8)
+
+        reference_array = np.asarray(reference_grid, dtype=np.uint8)
+        hops_incorrect = int(np.count_nonzero(hops_recalled_grid != reference_array))
+        hopa_incorrect = int(np.count_nonzero(hopa_recalled_grid != reference_array))
+
+        hops_percent = (hops_incorrect / NEURON_COUNT) * 100.0
+        hopa_percent = (hopa_incorrect / NEURON_COUNT) * 100.0
+
+        rows.append(
+            (
+                file_name,
+                format_error_cell(hopa_incorrect, hopa_percent),
+                format_error_cell(hops_incorrect, hops_percent),
+            )
+        )
+
+    if not rows:
+        print("No valid files to report.")
+        return
+
+    file_col_width = max(len("File"), max(len(row[0]) for row in rows))
+    hopa_col_width = max(len("HOPA"), max(len(row[1]) for row in rows))
+    hops_col_width = max(len("HOPS"), max(len(row[2]) for row in rows))
+
+    print("NN Status")
+    if hops_meta is not None:
+        print(
+            "HOPS: trained "
+            f"neurons={hops_meta['size']} "
+            f"activation={hops_meta['activation']} "
+            f"learning={hops_meta['learning_mode']} "
+            f"patterns={hops_meta['pattern_count']}"
+        )
+    else:
+        print("HOPS: trained (metadata unavailable)")
+
+    if hopa_meta is not None:
+        print(
+            "HOPA: trained "
+            f"neurons={hopa_meta['size']} "
+            f"activation={hopa_meta['activation']} "
+            f"learning={hopa_meta['learning_mode']} "
+            f"patterns={hopa_meta['pattern_count']}"
+        )
+    else:
+        print("HOPA: trained (metadata unavailable)")
+
+    print(f"Test Folder: {test_folder}")
+    header = f"{'File':<{file_col_width}}  {'HOPA':>{hopa_col_width}}  {'HOPS':>{hops_col_width}}"
+    print(header)
+    print("-" * len(header))
+    for file_name, hopa_text, hops_text in rows:
+        print(f"{file_name:<{file_col_width}}  {hopa_text:>{hopa_col_width}}  {hops_text:>{hops_col_width}}")
 
 
 def run_hopfield_training() -> None:
