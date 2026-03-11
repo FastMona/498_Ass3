@@ -14,9 +14,10 @@ HOPS_MODEL_PATH = MODELS_DIR / "HOPS.npz"
 HOPA_MODEL_PATH = MODELS_DIR / "HOPA.npz"
 LAST_RECALL_SNAPSHOT_PATH = MODELS_DIR / "LAST_RECALL_SNAPSHOT.npz"
 NEURON_COUNT = GRID_ROWS * GRID_COLS
-DEFAULT_ACTIVATION = "tan"
+DEFAULT_ACTIVATION = "sign"
 DEFAULT_LEARNING_MODE = "hebbian"
 DEFAULT_RECALL_TEST_FOLDER = "noisy_patterns"
+RECALL_PATTERNS_DIR = Path(__file__).resolve().parent / "recall_patterns"
 
 
 def _set_window_title(fig, window_title: str | None) -> None:
@@ -101,12 +102,26 @@ class HopfieldNetwork:
 
     def apply_activation(self, values: np.ndarray) -> np.ndarray:
         """Apply configured activation and return bipolar states (-1/+1)."""
-        if self.activation == "tan":
+        if self.activation in {"tanh", "tan"}:
             activated = np.tanh(values)
             return np.where(activated >= 0, 1, -1)
-        if self.activation == "sin":
-            activated = np.sin(values)
-            return np.where(activated >= 0, 1, -1)
+        if self.activation == "softmax":
+            # Winner-take-all bipolar projection from a softmax distribution.
+            if values.size <= 1:
+                return np.where(values >= 0, 1, -1)
+            shifted = values - np.max(values)
+            exp_values = np.exp(shifted)
+            denom = np.sum(exp_values)
+            if denom <= 0 or not np.isfinite(denom):
+                return np.where(values >= 0, 1, -1)
+            probabilities = exp_values / denom
+            winner_index = int(np.argmax(probabilities))
+            activated = np.full(values.shape, -1, dtype=int)
+            activated[winner_index] = 1
+            return activated
+        if self.activation in {"sign", "sin"}:
+            # Keep legacy "sin" model files compatible by mapping them to sign.
+            return np.where(values >= 0, 1, -1)
         return np.where(values >= 0, 1, -1)
 
     def train_hebbian(self, patterns: list[np.ndarray], label: str = "HEBB") -> None:
@@ -210,29 +225,51 @@ def load_training_patterns(folder: Path) -> tuple[list[np.ndarray], list[Path]]:
 def read_activation_choice() -> str:
     """Prompt user for activation choice."""
     while True:
-        value = input(f"Activation [tan/sin] (default {DEFAULT_ACTIVATION}): ").strip().lower()
+        print("Activation function:")
+        print("1. Sign")
+        print("2. Tanh")
+        print("3. SoftMax")
+        value = input("Choose activation [1]: ").strip().lower()
         if value == "":
-            return DEFAULT_ACTIVATION
-        if value in {"tan", "sin"}:
-            return value
-        print("Invalid activation. Choose 'tan' or 'sin'.")
+            return "sign"
+        if value == "1" or value in {"sign", "sin"}:
+            return "sign"
+        if value == "2" or value in {"tan", "tanh"}:
+            return "tanh"
+        if value == "3" or value in {"softmax", "soft_max", "soft"}:
+            return "softmax"
+        print("Invalid activation. Enter 1 (Sign), 2 (Tanh), or 3 (SoftMax).")
 
 
 def read_learning_mode_choice() -> str:
     """Prompt user for learning mode."""
     while True:
-        value = input(f"Learning mode [hebbian/storkey/pseudo_inv] (default {DEFAULT_LEARNING_MODE}): ").strip().lower()
+        print("Learning mode:")
+        print("1. Hebbian")
+        print("2. Storkey")
+        print("3. Pseudo Inverse")
+        value = input("Choose learning mode [1]: ").strip().lower()
         if value == "":
-            return DEFAULT_LEARNING_MODE
-        if value in {"hebbian", "storkey", "pseudo_inv"}:
-            return value
-        print("Invalid learning mode. Choose 'hebbian', 'storkey', or 'pseudo_inv'.")
+            return "hebbian"
+        if value == "1" or value in {"hebbian", "hebb"}:
+            return "hebbian"
+        if value == "2" or value in {"storkey", "stork"}:
+            return "storkey"
+        if value == "3" or value in {"pseudo_inv", "pseudo-inverse", "pseudoinverse", "pinv"}:
+            return "pseudo_inv"
+        print("Invalid learning mode. Enter 1 (Hebbian), 2 (Storkey), or 3 (Pseudo Inverse).")
 
 
 def ensure_models_dir() -> Path:
     """Ensure model output folder exists and return its path."""
     MODELS_DIR.mkdir(exist_ok=True)
     return MODELS_DIR
+
+
+def ensure_recall_patterns_dir() -> Path:
+    """Ensure recalled patterns output folder exists and return its path."""
+    RECALL_PATTERNS_DIR.mkdir(exist_ok=True)
+    return RECALL_PATTERNS_DIR
 
 
 def save_network_params(
@@ -327,6 +364,12 @@ def load_network_from_file(model_path: Path) -> HopfieldNetwork | None:
     except KeyError:
         return None
 
+    # Normalize legacy activation labels from older model files.
+    if activation == "tan":
+        activation = "tanh"
+    elif activation == "sin":
+        activation = "sign"
+
     if size != NEURON_COUNT:
         return None
     if weights.shape != (size, size):
@@ -352,6 +395,12 @@ def load_model_metadata(model_path: Path) -> dict[str, str] | None:
         activation = str(data["activation"])
     except KeyError:
         return None
+
+    # Normalize legacy activation labels for user-facing metadata.
+    if activation == "tan":
+        activation = "tanh"
+    elif activation == "sin":
+        activation = "sign"
 
     learning_mode = str(data["learning_mode"]) if "learning_mode" in data else "unknown"
     pattern_count = str(int(data["pattern_count"])) if "pattern_count" in data else "unknown"
@@ -442,6 +491,24 @@ def display_recalled_patterns(test_files: list[Path], recalled_grids: list[np.nd
     )
 
 
+def save_recalled_patterns(test_files: list[Path], recalled_grids: list[np.ndarray], model_name: str) -> int:
+    """Save recalled images to recall_patterns using MODEL_patternXX.img naming."""
+    output_folder = ensure_recall_patterns_dir()
+    saved_count = 0
+    cmap = ListedColormap(["white", "black"])
+
+    for test_file, recalled_grid in zip(test_files, recalled_grids):
+        pattern_stem = infer_reference_pattern_stem(test_file.stem)
+        output_name = f"{model_name}_{pattern_stem}.img"
+        output_path = output_folder / output_name
+        grid_array = np.asarray(recalled_grid, dtype=np.uint8)
+        # Force PNG encoding while honoring requested .img file naming.
+        plt.imsave(output_path, grid_array, cmap=cmap, vmin=0, vmax=1, format="png")
+        saved_count += 1
+
+    return saved_count
+
+
 def run_pattern_recall() -> None:
     """Recall up to 8 patterns from a test folder using both trained models."""
     print("\n=== Pattern Recall ===")
@@ -498,6 +565,10 @@ def run_pattern_recall() -> None:
 
     save_recent_recall_snapshot(test_folder, valid_files, hops_recalled_grids, hopa_recalled_grids)
     print(f"Saved latest recall snapshot for Option 5: {LAST_RECALL_SNAPSHOT_PATH.name}")
+
+    saved_hops = save_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
+    saved_hopa = save_recalled_patterns(valid_files, hopa_recalled_grids, "HOPA")
+    print(f"Saved recalled images: HOPS={saved_hops}, HOPA={saved_hopa} in {ensure_recall_patterns_dir()}")
 
     display_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
     display_recalled_patterns(valid_files, hopa_recalled_grids, "HOPA")
@@ -756,6 +827,8 @@ def run_recall_error_report() -> None:
     if not rows:
         print("No valid files to report.")
         return
+
+    rows.sort(key=lambda row: row[0].lower())
 
     total_hopa_text = str(total_hopa_incorrect)
     total_hops_text = str(total_hops_incorrect)

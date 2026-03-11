@@ -31,7 +31,7 @@ def _show_grid_window_process(grid: np.ndarray, title: str, window_title: str | 
     from matplotlib.colors import ListedColormap
 
     cmap = ListedColormap(["white", "black"])
-    fig, ax = plt.subplots(figsize=(5, 5))
+    fig, ax = plt.subplots(figsize=(12, 6))
     _set_window_title(fig, window_title)
     ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, interpolation="none")
     ax.set_title(title)
@@ -262,7 +262,7 @@ def display_image_grid(grid: list[list[int]], save_path: Path | None = None) -> 
     """Display the binary grid where 0=white and 1=black."""
     cmap = ListedColormap(["white", "black"])
 
-    image_title = f"{GRID_COLS}x{GRID_ROWS} Binary Image (0=white, 1=black)"
+    image_title = f"Binary Image ({GRID_ROWS} X {GRID_COLS}) (0=white, 1=black)"
 
     if save_path is not None:
         grid_array = np.asarray(grid, dtype=np.uint8)
@@ -298,7 +298,7 @@ def display_recent_patterns(folder: Path) -> None:
     show_gallery_window(
         images,
         image_titles,
-        suptitle="Original Patterns (Top 8)",
+        suptitle=f"Original Patterns ({GRID_ROWS} X {GRID_COLS})",
         window_title="Most Recent Patterns",
     )
 
@@ -318,11 +318,12 @@ def run_create_image() -> None:
     if edit_name_raw:
         edit_base_name = normalize_pattern_base_name(edit_name_raw)
         edit_image_path = pattern_image_path(output_folder, edit_base_name)
-        image = load_pattern_image(edit_image_path)
-        if image is None:
+        loaded_image = load_pattern_image(edit_image_path)
+        if loaded_image is None:
             print(f"Cannot edit '{edit_name_raw}': missing/invalid {GRID_COLS}x{GRID_ROWS} PNG at {edit_image_path.name}.")
             print("Create the pattern first using new mode.")
             return
+        image = loaded_image
 
         line_number = read_line_number()
         print("Edit mode: only one line is edited per run.")

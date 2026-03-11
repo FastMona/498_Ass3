@@ -11,7 +11,7 @@ import torch
 def show_menu() -> None:
     """Print the main dashboard menu."""
     print("\n=== Image Dashboard ===")
-    print("1. Patterns (10x12) Create/Save/Edit and View")
+    print("1. Patterns Create/Save/Edit and View")
     print("2. Noisy Patterns Create/Save/Edit and View")
     print("3. Train Hopfield Networks (HOPS, HOPA)")
     print("4. Recall of Noisy Paterns and View")

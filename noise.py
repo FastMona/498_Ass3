@@ -157,7 +157,7 @@ def display_recent_noisy_patterns(folder: Path, noise_percent_text: str) -> None
     show_gallery_window(
         images,
         image_titles,
-        suptitle=f"{noise_percent_text}% Noisy Patterns (Top 8)",
+        suptitle=f"{noise_percent_text}% Noisy Patterns ({GRID_ROWS} X {GRID_COLS})",
         window_title="Most Recent Noisy Patterns",
     )
 
