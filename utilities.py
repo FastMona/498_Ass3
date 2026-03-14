@@ -128,8 +128,7 @@ def _show_animation_window_process(
         image_artist = axis.imshow(sequence[0], cmap=cmap, vmin=0, vmax=1)
         axis.set_xticks([])
         axis.set_yticks([])
-        frame_total = max(1, int(sequence.shape[0]) - 1)
-        title_text = axis.set_title(f"{file_names[index]} | step 0/{frame_total}")
+        title_text = axis.set_title(file_names[index])
         image_artists.append(image_artist)
         title_texts.append(title_text)
 
@@ -144,8 +143,6 @@ def _show_animation_window_process(
             if image_artist is None or title_text is None:
                 continue
             image_artist.set_data(sequence[local_frame_index])
-            frame_total = max(1, int(sequence.shape[0]) - 1)
-            title_text.set_text(f"{file_names[index]} | step {local_frame_index}/{frame_total}")
             artists.extend([image_artist, title_text])
 
         suptitle.set_text(f"Global step {global_frame_index}/{max_frame_count - 1}")
@@ -288,10 +285,16 @@ def run_view_hopa_intermediate_animation_utility() -> None:
 
     interval_ms = _read_animation_interval_ms()
     stage_sequences = [np.asarray(sequence, dtype=np.uint8) for sequence in stages]
+    ordered_items = sorted(
+        zip(file_names, stage_sequences),
+        key=lambda item: item[0].lower(),
+    )
+    ordered_names = [item[0] for item in ordered_items]
+    ordered_sequences = [item[1] for item in ordered_items]
 
     show_animation_window(
-        stage_sequences,
-        file_names,
+        ordered_sequences,
+        ordered_names,
         window_title="HOPA Intermediate Stages (All Patterns)",
         interval_ms=interval_ms,
     )

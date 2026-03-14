@@ -7,6 +7,7 @@ from folder_prefs import PREFS_FILE
 WORKSPACE_DIR = Path(__file__).resolve().parent
 PATTERNS_DIR = WORKSPACE_DIR / "patterns"
 NOISY_PATTERNS_DIR = WORKSPACE_DIR / "noisy_patterns"
+TEMP_PATTERNS_DIR = WORKSPACE_DIR / "temp_patterns"
 TERMINAL_OUT_PATH = WORKSPACE_DIR / "terminal_out.txt"
 
 
@@ -35,6 +36,25 @@ def delete_png_files_in_folder(folder: Path) -> int:
         png_file.unlink(missing_ok=True)
         deleted_count += 1
     return deleted_count
+
+
+def delete_folder_contents(folder: Path) -> tuple[int, int]:
+    """Delete all files/subfolders inside folder and return deleted file/dir counts."""
+    if not folder.exists() or not folder.is_dir():
+        return 0, 0
+
+    deleted_files = 0
+    deleted_dirs = 0
+
+    for child in folder.iterdir():
+        if child.is_file():
+            child.unlink(missing_ok=True)
+            deleted_files += 1
+        elif child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+            deleted_dirs += 1
+
+    return deleted_files, deleted_dirs
 
 
 def delete_other_temp_files(root_folder: Path) -> tuple[int, int]:
@@ -99,6 +119,15 @@ def run_cleanup() -> None:
         print(f"Deleted {count} .png file(s) from noisy_patterns.")
     else:
         print("Skipped noisy pattern cleanup.")
+
+    if confirm_yes_no_default_no("Delete animation files in temp_patterns?"):
+        deleted_files, deleted_dirs = delete_folder_contents(TEMP_PATTERNS_DIR)
+        print(
+            f"Deleted animation outputs in temp_patterns: {deleted_files} file(s), "
+            f"{deleted_dirs} folder(s)."
+        )
+    else:
+        print("Skipped temp_patterns animation cleanup.")
 
     if confirm_yes_no_default_no("Delete other temp files?"):
         deleted_files, deleted_dirs = delete_other_temp_files(WORKSPACE_DIR)
