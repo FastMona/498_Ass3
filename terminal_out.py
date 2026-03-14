@@ -37,10 +37,11 @@ def install_terminal_output_logger(log_filename: str = "terminal_out.txt") -> Pa
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-    log_file = open(log_path, mode="w", encoding="utf-8")
+    log_file = open(log_path, mode="a", encoding="utf-8")
 
     run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     command_text = " ".join(sys.argv) if sys.argv else "python"
+    log_file.write("\n" + "=" * 60 + "\n")
     log_file.write(f"Run started: {run_timestamp}\n")
     log_file.write(f"Command: {command_text}\n")
     log_file.write("-" * 60 + "\n")

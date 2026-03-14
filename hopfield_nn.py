@@ -1,3 +1,4 @@
+from math import sqrt
 from pathlib import Path
 from typing import cast
 import numpy as np
@@ -6,6 +7,7 @@ from matplotlib.colors import ListedColormap
 from multiprocessing import get_context
 
 from create_img import GRID_ROWS, GRID_COLS, ensure_patterns_dir, load_pattern_image
+from folder_prefs import prompt_for_folder
 from terminal_out import install_terminal_output_logger
 
 
@@ -181,10 +183,16 @@ class HopfieldNetwork:
             state = self.apply_activation(activation)
         return state
 
-    def recall_asynchronous(self, pattern: np.ndarray, steps: int = 1) -> np.ndarray:
+    def recall_asynchronous(
+        self,
+        pattern: np.ndarray,
+        steps: int = 1,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
         """Recall using asynchronous state updates."""
         state = pattern.copy()
-        rng = np.random.default_rng()
+        if rng is None:
+            rng = np.random.default_rng()
         for _ in range(steps):
             order = rng.permutation(self.size)
             for neuron_index in order:
@@ -199,27 +207,55 @@ def grid_to_bipolar_vector(grid: list[list[int]]) -> np.ndarray:
     return np.where(array.reshape(-1) == 1, 1, -1)
 
 
-def load_training_patterns(folder: Path) -> tuple[list[np.ndarray], list[Path]]:
+def load_binary_png_any_size(image_path: Path) -> np.ndarray | None:
+    """Load a PNG as a 2D binary grid (0/1) at native dimensions."""
+    try:
+        data = plt.imread(image_path)
+    except OSError:
+        return None
+
+    if data.ndim == 3:
+        data = data[..., :3].mean(axis=2)
+
+    if data.ndim != 2:
+        return None
+
+    return (np.asarray(data) < 0.5).astype(np.uint8)
+
+
+def load_training_patterns(folder: Path) -> tuple[list[np.ndarray], list[Path], tuple[int, int] | None]:
     """Load valid training patterns from PNG files in a folder."""
     image_files = sorted(folder.glob("*.png"))
     vectors: list[np.ndarray] = []
     used_files: list[Path] = []
+    expected_shape: tuple[int, int] | None = None
 
     if not image_files:
-        return vectors, used_files
+        return vectors, used_files, expected_shape
 
-    print(f"Found {len(image_files)} PNG file(s). Validating {GRID_COLS}x{GRID_ROWS} patterns...")
+    print(f"Found {len(image_files)} PNG file(s). Validating consistent dimensions...")
     for index, image_file in enumerate(image_files, start=1):
-        grid = load_pattern_image(image_file)
-        if grid is None:
-            print(f"Skipping {image_file.name}: invalid shape/format.")
+        grid_array = load_binary_png_any_size(image_file)
+        if grid_array is None:
+            print(f"Skipping {image_file.name}: unreadable or non-2D PNG.")
             continue
 
-        vectors.append(grid_to_bipolar_vector(grid))
+        current_shape = (int(grid_array.shape[0]), int(grid_array.shape[1]))
+        if expected_shape is None:
+            expected_shape = current_shape
+            print(f"Detected training pattern size: {expected_shape[0]}x{expected_shape[1]}")
+        elif current_shape != expected_shape:
+            print(
+                f"Skipping {image_file.name}: size {current_shape[0]}x{current_shape[1]} does not match "
+                f"expected {expected_shape[0]}x{expected_shape[1]}."
+            )
+            continue
+
+        vectors.append(np.where(grid_array.reshape(-1) == 1, 1, -1))
         used_files.append(image_file)
         print(f"Loaded pattern {len(vectors)} from {image_file.name} ({index}/{len(image_files)})")
 
-    return vectors, used_files
+    return vectors, used_files, expected_shape
 
 
 def read_activation_choice() -> str:
@@ -279,6 +315,7 @@ def save_network_params(
     training_folder: Path,
     pattern_count: int,
     learning_mode: str,
+    grid_shape: tuple[int, int],
 ) -> None:
     """Persist network parameters so retraining is not required on next startup."""
     ensure_models_dir()
@@ -287,8 +324,8 @@ def save_network_params(
         weights=network.weights,
         activation=network.activation,
         size=network.size,
-        grid_rows=GRID_ROWS,
-        grid_cols=GRID_COLS,
+        grid_rows=grid_shape[0],
+        grid_cols=grid_shape[1],
         training_folder=str(training_folder),
         pattern_count=pattern_count,
         learning_mode=learning_mode,
@@ -341,10 +378,10 @@ def get_trained_model_labels() -> list[str]:
     return trained
 
 
-def bipolar_vector_to_grid(vector: np.ndarray) -> np.ndarray:
+def bipolar_vector_to_grid(vector: np.ndarray, grid_shape: tuple[int, int]) -> np.ndarray:
     """Convert bipolar vector (-1/+1) back to binary image grid (0/1)."""
     binary = np.where(vector.reshape(-1) == 1, 1, 0)
-    return binary.reshape((GRID_ROWS, GRID_COLS))
+    return binary.reshape(grid_shape)
 
 
 def load_network_from_file(model_path: Path) -> HopfieldNetwork | None:
@@ -370,8 +407,6 @@ def load_network_from_file(model_path: Path) -> HopfieldNetwork | None:
     elif activation == "sin":
         activation = "sign"
 
-    if size != NEURON_COUNT:
-        return None
     if weights.shape != (size, size):
         return None
 
@@ -405,6 +440,12 @@ def load_model_metadata(model_path: Path) -> dict[str, str] | None:
     learning_mode = str(data["learning_mode"]) if "learning_mode" in data else "unknown"
     pattern_count = str(int(data["pattern_count"])) if "pattern_count" in data else "unknown"
     training_folder = str(data["training_folder"]) if "training_folder" in data else "unknown"
+    if "grid_rows" in data and "grid_cols" in data:
+        grid_rows = str(int(data["grid_rows"]))
+        grid_cols = str(int(data["grid_cols"]))
+    else:
+        grid_rows = str(GRID_ROWS)
+        grid_cols = str(GRID_COLS)
 
     return {
         "size": str(size),
@@ -412,7 +453,58 @@ def load_model_metadata(model_path: Path) -> dict[str, str] | None:
         "learning_mode": learning_mode,
         "pattern_count": pattern_count,
         "training_folder": training_folder,
+        "grid_rows": grid_rows,
+        "grid_cols": grid_cols,
     }
+
+
+def get_model_grid_shape(model_path: Path, network: HopfieldNetwork) -> tuple[int, int] | None:
+    """Resolve model grid shape from metadata and validate it against neuron count."""
+    metadata = load_model_metadata(model_path)
+    if metadata is None:
+        return None
+
+    try:
+        rows = int(metadata["grid_rows"])
+        cols = int(metadata["grid_cols"])
+    except (KeyError, ValueError):
+        return None
+
+    if rows <= 0 or cols <= 0:
+        return None
+    if rows * cols != network.size:
+        return None
+
+    return rows, cols
+
+
+def infer_model_grid_shape_from_files(network: HopfieldNetwork, image_files: list[Path]) -> tuple[int, int] | None:
+    """Infer model grid shape from candidate PNG files using neuron count compatibility."""
+    matched_shapes: list[tuple[int, int]] = []
+    for image_path in image_files:
+        grid_array = load_binary_png_any_size(image_path)
+        if grid_array is None:
+            continue
+
+        rows, cols = int(grid_array.shape[0]), int(grid_array.shape[1])
+        if rows * cols != network.size:
+            continue
+
+        current_shape = (rows, cols)
+        if current_shape not in matched_shapes:
+            matched_shapes.append(current_shape)
+
+    if len(matched_shapes) == 1:
+        return matched_shapes[0]
+    return None
+
+
+def resolve_model_grid_shape(model_path: Path, network: HopfieldNetwork, image_files: list[Path]) -> tuple[int, int] | None:
+    """Resolve model shape from metadata or infer from candidate files for legacy compatibility."""
+    metadata_shape = get_model_grid_shape(model_path, network)
+    if metadata_shape is not None:
+        return metadata_shape
+    return infer_model_grid_shape_from_files(network, image_files)
 
 
 def save_recent_recall_snapshot(
@@ -420,6 +512,7 @@ def save_recent_recall_snapshot(
     valid_files: list[Path],
     hops_recalled_grids: list[np.ndarray],
     hopa_recalled_grids: list[np.ndarray],
+    grid_shape: tuple[int, int],
 ) -> None:
     """Persist latest recall outputs for downstream Option 5 analysis."""
     ensure_models_dir()
@@ -437,6 +530,8 @@ def save_recent_recall_snapshot(
         file_names=file_names,
         hops_recalled=hops_array,
         hopa_recalled=hopa_array,
+        grid_rows=grid_shape[0],
+        grid_cols=grid_shape[1],
     )
 
 
@@ -465,11 +560,25 @@ def load_recent_recall_snapshot() -> dict[str, object] | None:
     if hops_recalled.shape[0] != len(file_names):
         return None
 
+    if "grid_rows" in data and "grid_cols" in data:
+        grid_rows = int(data["grid_rows"])
+        grid_cols = int(data["grid_cols"])
+    else:
+        grid_rows = int(hops_recalled.shape[1])
+        grid_cols = int(hops_recalled.shape[2])
+
+    if grid_rows <= 0 or grid_cols <= 0:
+        return None
+    if hops_recalled.shape[1:] != (grid_rows, grid_cols):
+        return None
+
     return {
         "test_folder": str(data["test_folder"]),
         "file_names": file_names,
         "hops_recalled": hops_recalled,
         "hopa_recalled": hopa_recalled,
+        "grid_rows": grid_rows,
+        "grid_cols": grid_cols,
     }
 
 
@@ -512,11 +621,8 @@ def save_recalled_patterns(test_files: list[Path], recalled_grids: list[np.ndarr
 def run_pattern_recall() -> None:
     """Recall up to 8 patterns from a test folder using both trained models."""
     print("\n=== Pattern Recall ===")
-    folder_input = input(f"Folder to test [{DEFAULT_RECALL_TEST_FOLDER}]: ").strip()
-    test_folder = Path(folder_input) if folder_input else Path(DEFAULT_RECALL_TEST_FOLDER)
-
-    if not test_folder.is_absolute():
-        test_folder = Path(__file__).resolve().parent / test_folder
+    default_test_folder = Path(__file__).resolve().parent / DEFAULT_RECALL_TEST_FOLDER
+    test_folder = prompt_for_folder("hopfield.test_folder", "Folder to test", default_test_folder)
 
     if not test_folder.exists() or not test_folder.is_dir():
         print(f"Folder not found: {test_folder}")
@@ -542,28 +648,45 @@ def run_pattern_recall() -> None:
         print(f"No PNG images found in: {test_folder}")
         return
 
+    hops_shape = resolve_model_grid_shape(HOPS_MODEL_PATH, hops_network, test_files)
+    hopa_shape = resolve_model_grid_shape(HOPA_MODEL_PATH, hopa_network, test_files)
+    if hops_shape is None or hopa_shape is None:
+        print("Could not resolve model image shape from metadata or test folder. Retrain with option 3.")
+        return
+    if hops_shape != hopa_shape:
+        print("Model shape mismatch between HOPS and HOPA. Retrain both models with option 3.")
+        return
+
+    model_shape = hops_shape
+
     hops_recalled_grids: list[np.ndarray] = []
     hopa_recalled_grids: list[np.ndarray] = []
     valid_files: list[Path] = []
 
     for test_file in test_files:
-        grid = load_pattern_image(test_file)
-        if grid is None:
-            print(f"Skipping {test_file.name}: expected {GRID_COLS}x{GRID_ROWS} binary pattern PNG.")
+        grid_array = load_binary_png_any_size(test_file)
+        if grid_array is None:
+            print(f"Skipping {test_file.name}: unable to read as a 2D pattern PNG.")
+            continue
+        if tuple(grid_array.shape) != model_shape:
+            print(
+                f"Skipping {test_file.name}: size {grid_array.shape[0]}x{grid_array.shape[1]} does not match "
+                f"trained model size {model_shape[0]}x{model_shape[1]}."
+            )
             continue
 
-        vector = grid_to_bipolar_vector(grid)
+        vector = np.where(grid_array.reshape(-1) == 1, 1, -1)
         hops_recalled = hops_network.recall_synchronous(vector, steps=1)
         hopa_recalled = hopa_network.recall_asynchronous(vector, steps=1)
-        hops_recalled_grids.append(bipolar_vector_to_grid(hops_recalled))
-        hopa_recalled_grids.append(bipolar_vector_to_grid(hopa_recalled))
+        hops_recalled_grids.append(bipolar_vector_to_grid(hops_recalled, model_shape))
+        hopa_recalled_grids.append(bipolar_vector_to_grid(hopa_recalled, model_shape))
         valid_files.append(test_file)
 
     if not hops_recalled_grids:
         print("No valid patterns to recall.")
         return
 
-    save_recent_recall_snapshot(test_folder, valid_files, hops_recalled_grids, hopa_recalled_grids)
+    save_recent_recall_snapshot(test_folder, valid_files, hops_recalled_grids, hopa_recalled_grids, model_shape)
     print(f"Saved latest recall snapshot for Option 5: {LAST_RECALL_SNAPSHOT_PATH.name}")
 
     saved_hops = save_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
@@ -597,6 +720,168 @@ def read_repeat_count() -> int:
         print("Invalid input: enter a positive integer.")
 
 
+def read_monte_carlo_run_count() -> int:
+    """Read how many Monte Carlo runs to execute for Option 7."""
+    while True:
+        value = input("Number of Monte Carlo runs [30]: ").strip()
+        if value == "":
+            return 30
+        if value.isdigit() and int(value) > 0:
+            return int(value)
+        print("Invalid input: enter a positive integer.")
+
+
+def _read_activation_index(prompt: str, allowed: set[int], default_value: int) -> int:
+    """Read activation index from allowed set."""
+    while True:
+        value = input(prompt).strip().lower()
+        if value == "":
+            return default_value
+        if value in {"1", "sign", "sin"} and 1 in allowed:
+            return 1
+        if value in {"2", "tanh", "tan"} and 2 in allowed:
+            return 2
+        if value in {"3", "softmax", "soft", "soft_max"} and 3 in allowed:
+            return 3
+        allowed_text = ", ".join(str(item) for item in sorted(allowed))
+        print(f"Invalid activation choice. Allowed: {allowed_text}.")
+
+
+def read_monte_carlo_activation_choices() -> list[str]:
+    """Read activation subset selection for Option 7 (one, two, or all)."""
+    activation_map = {1: "sign", 2: "tanh", 3: "softmax"}
+
+    while True:
+        print("Activation selection for Monte Carlo:")
+        print("1. One activation")
+        print("2. Two activations")
+        print("3. All activations")
+        selection = input("Choose [3]: ").strip().lower()
+
+        if selection == "":
+            selection = "3"
+
+        if selection in {"3", "all"}:
+            return ["sign", "tanh", "softmax"]
+
+        if selection in {"1", "one", "single"}:
+            print("Activation choices: 1=Sign, 2=Tanh, 3=SoftMax")
+            chosen = _read_activation_index("Pick one [1]: ", {1, 2, 3}, 1)
+            return [activation_map[chosen]]
+
+        if selection in {"2", "two", "pair"}:
+            print("Activation choices: 1=Sign, 2=Tanh, 3=SoftMax")
+            first = _read_activation_index("Pick first [1]: ", {1, 2, 3}, 1)
+            remaining = {1, 2, 3} - {first}
+            second_default = min(remaining)
+            second = _read_activation_index("Pick second: ", remaining, second_default)
+            chosen_order = [first, second]
+            return [activation_map[index] for index in chosen_order]
+
+        print("Invalid choice. Enter 1 (one), 2 (two), or 3 (all).")
+
+
+def _read_learning_mode_index(prompt: str, allowed: set[int], default_value: int) -> int:
+    """Read learning-mode index from allowed set."""
+    while True:
+        value = input(prompt).strip().lower()
+        if value == "":
+            return default_value
+        if value in {"1", "hebbian", "hebb"} and 1 in allowed:
+            return 1
+        if value in {"2", "storkey", "stork"} and 2 in allowed:
+            return 2
+        if value in {"3", "pseudo_inv", "pseudo-inverse", "pseudoinverse", "pinv"} and 3 in allowed:
+            return 3
+        allowed_text = ", ".join(str(item) for item in sorted(allowed))
+        print(f"Invalid learning choice. Allowed: {allowed_text}.")
+
+
+def read_monte_carlo_learning_choices() -> list[str]:
+    """Read learning-mode subset selection for Option 7 (one, two, or all)."""
+    learning_map = {1: "hebbian", 2: "storkey", 3: "pseudo_inv"}
+
+    while True:
+        print("Learning mode selection for Monte Carlo:")
+        print("1. One learning mode")
+        print("2. Two learning modes")
+        print("3. All learning modes")
+        selection = input("Choose [3]: ").strip().lower()
+
+        if selection == "":
+            selection = "3"
+
+        if selection in {"3", "all"}:
+            return ["hebbian", "storkey", "pseudo_inv"]
+
+        if selection in {"1", "one", "single"}:
+            print("Learning choices: 1=Hebbian, 2=Storkey, 3=Pseudo Inverse")
+            chosen = _read_learning_mode_index("Pick one [1]: ", {1, 2, 3}, 1)
+            return [learning_map[chosen]]
+
+        if selection in {"2", "two", "pair"}:
+            print("Learning choices: 1=Hebbian, 2=Storkey, 3=Pseudo Inverse")
+            first = _read_learning_mode_index("Pick first [1]: ", {1, 2, 3}, 1)
+            remaining = {1, 2, 3} - {first}
+            second_default = min(remaining)
+            second = _read_learning_mode_index("Pick second: ", remaining, second_default)
+            chosen_order = [first, second]
+            return [learning_map[index] for index in chosen_order]
+
+        print("Invalid choice. Enter 1 (one), 2 (two), or 3 (all).")
+
+
+def read_monte_carlo_compare_mode() -> str:
+    """Read Option 7 compare mode submenu choice."""
+    while True:
+        print("Monte Carlo compare mode:")
+        print("1. Compare Activation")
+        print("2. Compare Learning")
+        selection = input("Choose [1]: ").strip().lower()
+        if selection == "":
+            return "activation"
+        if selection in {"1", "activation", "act"}:
+            return "activation"
+        if selection in {"2", "learning", "learn", "lm"}:
+            return "learning"
+        print("Invalid choice. Enter 1 (Compare Activation) or 2 (Compare Learning).")
+
+
+def read_monte_carlo_recall_mode() -> str:
+    """Read Option 7 recall method choice (HOPS or HOPA)."""
+    while True:
+        print("Recall method:")
+        print("1. HOPS (synchronous)")
+        print("2. HOPA (asynchronous)")
+        selection = input("Choose [2]: ").strip().lower()
+        if selection == "":
+            return "HOPA"
+        if selection in {"1", "hops", "sync", "synchronous"}:
+            return "HOPS"
+        if selection in {"2", "hopa", "async", "asynchronous"}:
+            return "HOPA"
+        print("Invalid choice. Enter 1 (HOPS) or 2 (HOPA).")
+
+
+def _ci95_half_width(values: np.ndarray) -> float:
+    """Return 95% CI half-width for sample mean using normal approximation."""
+    n = int(values.size)
+    if n <= 1:
+        return 0.0
+    sample_std = float(np.std(values, ddof=1))
+    return 1.96 * sample_std / sqrt(float(n))
+
+
+def _learning_mode_abbrev(learning_mode: str) -> str:
+    """Return short learning-mode label for compact report headers."""
+    mapping = {
+        "hebbian": "HEB",
+        "storkey": "STO",
+        "pseudo_inv": "PI",
+    }
+    return mapping.get(learning_mode, learning_mode.upper())
+
+
 def _safe_div(numerator: float, denominator: float) -> float:
     """Return numerator/denominator, or 0 when denominator is 0."""
     if denominator == 0:
@@ -621,11 +906,8 @@ def _format_float_cell(value: float, width: int = 10) -> str:
 def run_repeat_recall_report() -> None:
     """Run repeated recalls and print aggregate error and average metric report in terminal."""
     print("\n=== Repeat Recall Report ===")
-    folder_input = input(f"Folder to test [{DEFAULT_RECALL_TEST_FOLDER}]: ").strip()
-    test_folder = Path(folder_input) if folder_input else Path(DEFAULT_RECALL_TEST_FOLDER)
-
-    if not test_folder.is_absolute():
-        test_folder = Path(__file__).resolve().parent / test_folder
+    default_test_folder = Path(__file__).resolve().parent / DEFAULT_RECALL_TEST_FOLDER
+    test_folder = prompt_for_folder("hopfield.test_folder", "Folder to test", default_test_folder)
 
     if not test_folder.exists() or not test_folder.is_dir():
         print(f"Folder not found: {test_folder}")
@@ -653,27 +935,50 @@ def run_repeat_recall_report() -> None:
         print(f"No PNG images found in: {test_folder}")
         return
 
+    hops_shape = resolve_model_grid_shape(HOPS_MODEL_PATH, hops_network, test_files)
+    hopa_shape = resolve_model_grid_shape(HOPA_MODEL_PATH, hopa_network, test_files)
+    if hops_shape is None or hopa_shape is None:
+        print("Could not resolve model image shape from metadata or test folder. Retrain with option 3.")
+        return
+    if hops_shape != hopa_shape:
+        print("Model shape mismatch between HOPS and HOPA. Retrain both models with option 3.")
+        return
+
+    model_shape = hops_shape
+
     patterns_folder = ensure_patterns_dir()
     test_cases: list[tuple[str, np.ndarray, np.ndarray]] = []
 
     for test_file in test_files:
-        noisy_grid = load_pattern_image(test_file)
+        noisy_grid = load_binary_png_any_size(test_file)
         if noisy_grid is None:
-            print(f"Skipping {test_file.name}: expected {GRID_COLS}x{GRID_ROWS} binary pattern PNG.")
+            print(f"Skipping {test_file.name}: unable to read as a 2D pattern PNG.")
+            continue
+        if tuple(noisy_grid.shape) != model_shape:
+            print(
+                f"Skipping {test_file.name}: size {noisy_grid.shape[0]}x{noisy_grid.shape[1]} does not match "
+                f"trained model size {model_shape[0]}x{model_shape[1]}."
+            )
             continue
 
         reference_stem = infer_reference_pattern_stem(test_file.stem)
         reference_path = patterns_folder / f"{reference_stem}.png"
-        reference_grid = load_pattern_image(reference_path)
+        reference_grid = load_binary_png_any_size(reference_path)
         if reference_grid is None:
             print(f"Skipping {test_file.name}: reference pattern not found/invalid ({reference_path.name}).")
+            continue
+        if tuple(reference_grid.shape) != model_shape:
+            print(
+                f"Skipping {test_file.name}: reference size {reference_grid.shape[0]}x{reference_grid.shape[1]} does not match "
+                f"trained model size {model_shape[0]}x{model_shape[1]}."
+            )
             continue
 
         test_cases.append(
             (
                 test_file.name,
-                grid_to_bipolar_vector(noisy_grid),
-                np.asarray(reference_grid, dtype=np.uint8),
+                np.where(noisy_grid.reshape(-1) == 1, 1, -1),
+                reference_grid,
             )
         )
 
@@ -695,8 +1000,8 @@ def run_repeat_recall_report() -> None:
             hops_recalled = hops_network.recall_synchronous(noisy_vector, steps=1)
             hopa_recalled = hopa_network.recall_asynchronous(noisy_vector, steps=1)
 
-            hops_grid = bipolar_vector_to_grid(hops_recalled)
-            hopa_grid = bipolar_vector_to_grid(hopa_recalled)
+            hops_grid = bipolar_vector_to_grid(hops_recalled, model_shape)
+            hopa_grid = bipolar_vector_to_grid(hopa_recalled, model_shape)
 
             hops_errors = int(np.count_nonzero(hops_grid != reference_array))
             hopa_errors = int(np.count_nonzero(hopa_grid != reference_array))
@@ -723,7 +1028,7 @@ def run_repeat_recall_report() -> None:
         per_repeat_errors["HOPA"].append(hopa_repeat_errors)
 
     total_images_evaluated = repeat_count * len(test_cases)
-    total_pixels_evaluated = total_images_evaluated * NEURON_COUNT
+    total_pixels_evaluated = total_images_evaluated * (model_shape[0] * model_shape[1])
 
     print(f"Repeats: {repeat_count}")
     print(f"Files used: {len(test_cases)} (up to 8)")
@@ -775,6 +1080,230 @@ def run_repeat_recall_report() -> None:
             f"{_format_float_cell(f_score)}"
         )
 
+
+def run_monte_carlo_report() -> None:
+    """Run Monte Carlo recall and compare activation or learning mode with mean +/- 95% CI errors."""
+    print("\n=== Monte Carlo Recall Report ===")
+    print("Seed policy: base seed = 42")
+
+    training_folder = prompt_for_folder(
+        "hopfield.training_folder",
+        "Training folder",
+        ensure_patterns_dir(),
+    )
+    if not training_folder.exists() or not training_folder.is_dir():
+        print(f"Folder not found: {training_folder}")
+        return
+
+    test_folder = prompt_for_folder(
+        "hopfield.test_folder",
+        "Folder to test",
+        Path(__file__).resolve().parent / DEFAULT_RECALL_TEST_FOLDER,
+    )
+    if not test_folder.exists() or not test_folder.is_dir():
+        print(f"Folder not found: {test_folder}")
+        return
+
+    reference_folder = training_folder
+
+    compare_mode = read_monte_carlo_compare_mode()
+
+    fixed_learning_mode: str | None = None
+    fixed_activation: str | None = None
+    comparison_labels: list[str]
+
+    if compare_mode == "activation":
+        fixed_learning_mode = read_learning_mode_choice()
+        comparison_labels = read_monte_carlo_activation_choices()
+    else:
+        fixed_activation = read_activation_choice()
+        comparison_labels = read_monte_carlo_learning_choices()
+
+    recall_mode = read_monte_carlo_recall_mode()
+
+    run_count = read_monte_carlo_run_count()
+
+    vectors, used_files, grid_shape = load_training_patterns(training_folder)
+    if not vectors:
+        print("No valid training patterns found. Monte Carlo aborted.")
+        return
+    if grid_shape is None:
+        print("Could not determine training dimensions. Monte Carlo aborted.")
+        return
+
+    if compare_mode == "activation":
+        print(
+            f"Preparing models: compare=activation, learning={fixed_learning_mode}, "
+            f"activations={', '.join(comparison_labels)}, patterns={len(used_files)}, "
+            f"grid={grid_shape[0]}x{grid_shape[1]}"
+        )
+    else:
+        print(
+            f"Preparing models: compare=learning, activation={fixed_activation}, "
+            f"learning_modes={', '.join(comparison_labels)}, patterns={len(used_files)}, "
+            f"grid={grid_shape[0]}x{grid_shape[1]}"
+        )
+
+    neuron_count = int(vectors[0].size)
+    networks: dict[str, HopfieldNetwork] = {}
+    for label in comparison_labels:
+        if compare_mode == "activation":
+            activation_name = label
+            learning_mode = fixed_learning_mode if fixed_learning_mode is not None else DEFAULT_LEARNING_MODE
+            print(f"Training activation '{activation_name}'...")
+            network = HopfieldNetwork(neuron_count, activation=activation_name)
+            train_network(network, vectors, learning_mode, label=f"MC-{activation_name.upper()}")
+        else:
+            learning_mode = label
+            activation_name = fixed_activation if fixed_activation is not None else DEFAULT_ACTIVATION
+            print(f"Training learning mode '{learning_mode}'...")
+            network = HopfieldNetwork(neuron_count, activation=activation_name)
+            train_network(network, vectors, learning_mode, label=f"MC-{_learning_mode_abbrev(learning_mode)}")
+        networks[label] = network
+
+    test_files = sorted(
+        test_folder.glob("*.png"),
+        key=lambda file_path: file_path.stat().st_mtime,
+        reverse=True,
+    )[:8]
+
+    if not test_files:
+        print(f"No PNG images found in: {test_folder}")
+        return
+
+    test_cases: list[tuple[str, np.ndarray, np.ndarray]] = []
+
+    for test_file in test_files:
+        noisy_grid = load_binary_png_any_size(test_file)
+        if noisy_grid is None:
+            print(f"Skipping {test_file.name}: unable to read as a 2D pattern PNG.")
+            continue
+        if tuple(noisy_grid.shape) != grid_shape:
+            print(
+                f"Skipping {test_file.name}: size {noisy_grid.shape[0]}x{noisy_grid.shape[1]} does not match "
+                f"model size {grid_shape[0]}x{grid_shape[1]}."
+            )
+            continue
+
+        reference_stem = infer_reference_pattern_stem(test_file.stem)
+        reference_path = reference_folder / f"{reference_stem}.png"
+        reference_grid = load_binary_png_any_size(reference_path)
+        if reference_grid is None:
+            print(f"Skipping {test_file.name}: reference pattern not found/invalid ({reference_path.name}).")
+            continue
+        if tuple(reference_grid.shape) != grid_shape:
+            print(
+                f"Skipping {test_file.name}: reference size {reference_grid.shape[0]}x{reference_grid.shape[1]} does not match "
+                f"model size {grid_shape[0]}x{grid_shape[1]}."
+            )
+            continue
+
+        test_cases.append(
+            (
+                test_file.name,
+                np.where(noisy_grid.reshape(-1) == 1, 1, -1),
+                reference_grid,
+            )
+        )
+
+    if not test_cases:
+        print("No valid files to evaluate.")
+        return
+
+    print(
+        f"Running Monte Carlo: runs={run_count}, files={len(test_cases)}, "
+        f"columns={len(comparison_labels)}"
+    )
+
+    row_names = [file_name for file_name, _, _ in test_cases]
+    row_names.append("FOLDER_TOTAL")
+    errors_by_column: dict[str, dict[str, list[float]]] = {
+        label: {row_name: [] for row_name in row_names}
+        for label in comparison_labels
+    }
+
+    for run_index in range(run_count):
+        print(f"[MC] Run {run_index + 1}/{run_count}")
+        for label_index, label in enumerate(comparison_labels):
+            run_seed = 42 + (run_index * 1000) + label_index
+            run_rng = np.random.default_rng(run_seed)
+            run_total_errors = 0
+
+            for file_name, noisy_vector, reference_grid in test_cases:
+                if recall_mode == "HOPS":
+                    recalled = networks[label].recall_synchronous(noisy_vector, steps=1)
+                else:
+                    recalled = networks[label].recall_asynchronous(noisy_vector, steps=1, rng=run_rng)
+                recalled_grid = bipolar_vector_to_grid(recalled, grid_shape)
+                errors = int(np.count_nonzero(recalled_grid != reference_grid))
+                errors_by_column[label][file_name].append(float(errors))
+                run_total_errors += errors
+
+            errors_by_column[label]["FOLDER_TOTAL"].append(float(run_total_errors))
+            label_text = label.upper() if compare_mode == "activation" else _learning_mode_abbrev(label)
+            print(
+                f"  [MC] {label_text:<7} complete "
+                f"(seed={run_seed}, total_errors={run_total_errors})"
+            )
+
+    ci_title = "Mean +/- 95% CI"
+    row_width = max(len("Pattern"), max(len(row_name) for row_name in row_names))
+    column_widths: dict[str, int] = {}
+
+    formatted_cells: dict[str, dict[str, str]] = {row_name: {} for row_name in row_names}
+    for label in comparison_labels:
+        column_title = label.upper() if compare_mode == "activation" else _learning_mode_abbrev(label)
+        column_widths[label] = max(len(column_title), len(ci_title))
+        for row_name in row_names:
+            row_values = np.asarray(errors_by_column[label][row_name], dtype=float)
+            mean_value = float(np.mean(row_values))
+            ci_half_width = _ci95_half_width(row_values)
+            cell_text = f"{mean_value:.2f} +/- {ci_half_width:.2f}"
+            formatted_cells[row_name][label] = cell_text
+            column_widths[label] = max(column_widths[label], len(cell_text))
+
+    header_parts = [f"{'Pattern':<{row_width}}"]
+    for label in comparison_labels:
+        column_title = label.upper() if compare_mode == "activation" else _learning_mode_abbrev(label)
+        header_parts.append(f"{column_title:>{column_widths[label]}}")
+    header = "  ".join(header_parts)
+
+    print()
+    print()
+    if compare_mode == "activation":
+        header_variant = _learning_mode_abbrev(
+            fixed_learning_mode if fixed_learning_mode is not None else DEFAULT_LEARNING_MODE
+        )
+    else:
+        header_variant = (fixed_activation if fixed_activation is not None else DEFAULT_ACTIVATION).upper()
+
+    title_main = f"MONTE CARLO ERROR TABLE - {recall_mode} - {header_variant} - {run_count}"
+    if compare_mode == "activation":
+        fixed_text = f"LM={_learning_mode_abbrev(fixed_learning_mode if fixed_learning_mode is not None else DEFAULT_LEARNING_MODE)}"
+        compare_text = "CMP=ACT"
+    else:
+        fixed_text = f"ACT={(fixed_activation if fixed_activation is not None else DEFAULT_ACTIVATION).upper()}"
+        compare_text = "CMP=LRN"
+    title_info = f"{compare_text} | RCL={recall_mode} | {fixed_text} | RUNS={run_count} | FILES={len(test_cases)}"
+    title_border = "=" * max(len(title_main), len(title_info), len(header))
+
+    print(title_border)
+    print(title_main)
+    print(title_info)
+    print(title_border)
+    print(f"Columns: {ci_title}")
+    print(header)
+    print("-" * len(header))
+
+    for row_name in row_names:
+        row_parts = [f"{row_name:<{row_width}}"]
+        for label in comparison_labels:
+            row_parts.append(f"{formatted_cells[row_name][label]:>{column_widths[label]}}")
+        print("  ".join(row_parts))
+
+    print("-" * len(header))
+    print("Monte Carlo run complete.")
+
 def run_recall_error_report() -> None:
     """Print per-file recall error counts/percentages from the latest snapshot."""
     print("\n=== Recall Error Report ===")
@@ -790,8 +1319,21 @@ def run_recall_error_report() -> None:
     file_names = cast(list[str], snapshot["file_names"])
     hops_recalled = np.asarray(snapshot["hops_recalled"], dtype=np.uint8)
     hopa_recalled = np.asarray(snapshot["hopa_recalled"], dtype=np.uint8)
+    snapshot_rows = int(cast(int | str, snapshot["grid_rows"]))
+    snapshot_cols = int(cast(int | str, snapshot["grid_cols"]))
+    snapshot_shape = (snapshot_rows, snapshot_cols)
 
-    patterns_folder = ensure_patterns_dir()
+    default_reference_folder = ensure_patterns_dir()
+    patterns_folder = prompt_for_folder(
+        "hopfield.reference_folder",
+        "Reference pattern folder",
+        default_reference_folder,
+    )
+
+    if not patterns_folder.exists() or not patterns_folder.is_dir():
+        print(f"Folder not found: {patterns_folder}")
+        return
+
     rows: list[tuple[str, str, str]] = []
     total_hopa_incorrect = 0
     total_hops_incorrect = 0
@@ -799,20 +1341,27 @@ def run_recall_error_report() -> None:
     for index, file_name in enumerate(file_names):
         reference_stem = infer_reference_pattern_stem(Path(file_name).stem)
         reference_path = patterns_folder / f"{reference_stem}.png"
-        reference_grid = load_pattern_image(reference_path)
+        reference_grid = load_binary_png_any_size(reference_path)
         if reference_grid is None:
             print(f"Skipping {file_name}: reference pattern not found/invalid ({reference_path.name}).")
+            continue
+        if tuple(reference_grid.shape) != snapshot_shape:
+            print(
+                f"Skipping {file_name}: reference size {reference_grid.shape[0]}x{reference_grid.shape[1]} does not match "
+                f"snapshot size {snapshot_shape[0]}x{snapshot_shape[1]}."
+            )
             continue
 
         hops_recalled_grid = np.asarray(hops_recalled[index], dtype=np.uint8)
         hopa_recalled_grid = np.asarray(hopa_recalled[index], dtype=np.uint8)
 
-        reference_array = np.asarray(reference_grid, dtype=np.uint8)
+        reference_array = reference_grid
         hops_incorrect = int(np.count_nonzero(hops_recalled_grid != reference_array))
         hopa_incorrect = int(np.count_nonzero(hopa_recalled_grid != reference_array))
 
-        hops_percent = (hops_incorrect / NEURON_COUNT) * 100.0
-        hopa_percent = (hopa_incorrect / NEURON_COUNT) * 100.0
+        neuron_count = int(reference_array.size)
+        hops_percent = (hops_incorrect / neuron_count) * 100.0
+        hopa_percent = (hopa_incorrect / neuron_count) * 100.0
         total_hopa_incorrect += hopa_incorrect
         total_hops_incorrect += hops_incorrect
 
@@ -861,6 +1410,7 @@ def run_recall_error_report() -> None:
         print("HOPA: trained (metadata unavailable)")
 
     print(f"Test Folder: {test_folder}")
+    print(f"Reference Folder: {patterns_folder}")
 
     header = f"{'File':<{file_col_width}}  {'HOPA':>{hopa_col_width}}  {'HOPS':>{hops_col_width}}"
     print(header)
@@ -875,43 +1425,53 @@ def run_hopfield_training() -> None:
     """Train and save synchronous/asynchronous Hopfield models from PNG patterns."""
     print("\n=== Hopfield Training ===")
     default_folder = ensure_patterns_dir()
-    folder_input = input(f"Training folder [{default_folder.name}]: ").strip()
-    training_folder = Path(folder_input) if folder_input else default_folder
-
-    if not training_folder.is_absolute():
-        training_folder = Path(__file__).resolve().parent / training_folder
+    training_folder = prompt_for_folder("hopfield.training_folder", "Training folder", default_folder)
 
     if not training_folder.exists() or not training_folder.is_dir():
         print(f"Folder not found: {training_folder}")
         return
 
-    vectors, used_files = load_training_patterns(training_folder)
+    vectors, used_files, grid_shape = load_training_patterns(training_folder)
     if not vectors:
         print("No valid training patterns found. Training aborted.")
         return
 
-    vector_size = GRID_ROWS * GRID_COLS
-    if vector_size != NEURON_COUNT:
-        print(
-            "Configuration mismatch: "
-            f"vector size is {vector_size} but NEURON_COUNT is {NEURON_COUNT}."
-        )
+    if grid_shape is None:
+        print("Could not determine training dimensions. Training aborted.")
         return
 
-    neuron_count = NEURON_COUNT
+    vector_size = int(vectors[0].size)
+    neuron_count = vector_size
     activation_name = read_activation_choice()
     learning_mode = read_learning_mode_choice()
 
     print(f"Starting training with {len(vectors)} pattern(s), vector size {vector_size}...")
+    print(f"Detected grid size: {grid_shape[0]}x{grid_shape[1]} -> neurons={neuron_count}")
     print(f"Configuration: activation={activation_name}, learning={learning_mode}")
 
     sync_network = HopfieldNetwork(neuron_count, activation=activation_name)
     train_network(sync_network, vectors, learning_mode, label="HOPS")
-    save_network_params(HOPS_MODEL_PATH, "HOPS", sync_network, training_folder, len(used_files), learning_mode)
+    save_network_params(
+        HOPS_MODEL_PATH,
+        "HOPS",
+        sync_network,
+        training_folder,
+        len(used_files),
+        learning_mode,
+        grid_shape,
+    )
 
     async_network = HopfieldNetwork(neuron_count, activation=activation_name)
     train_network(async_network, vectors, learning_mode, label="HOPA")
-    save_network_params(HOPA_MODEL_PATH, "HOPA", async_network, training_folder, len(used_files), learning_mode)
+    save_network_params(
+        HOPA_MODEL_PATH,
+        "HOPA",
+        async_network,
+        training_folder,
+        len(used_files),
+        learning_mode,
+        grid_shape,
+    )
 
     sample = vectors[0]
     sync_recalled = sync_network.recall_synchronous(sample, steps=1)

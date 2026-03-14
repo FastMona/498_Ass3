@@ -5,7 +5,8 @@ from matplotlib.colors import ListedColormap
 from multiprocessing import get_context
 import numpy as np
 
-from create_img import GRID_ROWS, GRID_COLS, ensure_patterns_dir, load_pattern_image
+from create_img import ensure_patterns_dir
+from folder_prefs import prompt_for_folder
 
 
 NOISY_PATTERNS_DIR = Path(__file__).resolve().parent / "noisy_patterns"
@@ -116,20 +117,38 @@ def read_noise_percent() -> float:
         print("Invalid input: percent noise must be between 0 and 100.")
 
 
-def apply_noise_to_grid(grid: list[list[int]], noise_percent: float) -> list[list[int]]:
-    """Randomly flip approximately noise_percent of bits in the grid."""
-    grid_array = np.asarray(grid, dtype=np.uint8)
+def load_binary_png_any_size(image_path: Path) -> np.ndarray | None:
+    """Load a PNG as a 2D binary grid (0/1) of its native size."""
+    try:
+        data = plt.imread(image_path)
+    except OSError:
+        return None
+
+    if data.ndim == 3:
+        data = data[..., :3].mean(axis=2)
+
+    if data.ndim != 2:
+        return None
+
+    return (np.asarray(data) < 0.5).astype(np.uint8)
+
+
+def apply_noise_to_grid(grid_array: np.ndarray, noise_percent: float) -> np.ndarray:
+    """Randomly flip approximately noise_percent of bits in a binary grid."""
+    if grid_array.ndim != 2:
+        raise ValueError("Expected a 2D grid array.")
+
     total_bits = grid_array.size
     flip_count = int(round((noise_percent / 100.0) * total_bits))
 
     if flip_count <= 0:
-        return grid_array.tolist()
+        return grid_array.copy()
 
     rng = np.random.default_rng()
     flat_indices = rng.choice(total_bits, size=flip_count, replace=False)
-    flat_grid = grid_array.reshape(-1)
+    flat_grid = grid_array.reshape(-1).copy()
     flat_grid[flat_indices] = 1 - flat_grid[flat_indices]
-    return flat_grid.reshape((GRID_ROWS, GRID_COLS)).tolist()
+    return flat_grid.reshape(grid_array.shape)
 
 
 def display_recent_noisy_patterns(folder: Path, noise_percent_text: str) -> None:
@@ -154,10 +173,17 @@ def display_recent_noisy_patterns(folder: Path, noise_percent_text: str) -> None
     image_titles = [item[0] for item in ordered_items]
     images = [item[1] for item in ordered_items]
 
+    dimensions = {(image.shape[0], image.shape[1]) for image in images}
+    if len(dimensions) == 1:
+        rows, cols = next(iter(dimensions))
+        size_text = f" ({rows} X {cols})"
+    else:
+        size_text = " (mixed sizes)"
+
     show_gallery_window(
         images,
         image_titles,
-        suptitle=f"{noise_percent_text}% Noisy Patterns ({GRID_ROWS} X {GRID_COLS})",
+        suptitle=f"{noise_percent_text}% Noisy Patterns{size_text}",
         window_title="Most Recent Noisy Patterns",
     )
 
@@ -165,11 +191,7 @@ def display_recent_noisy_patterns(folder: Path, noise_percent_text: str) -> None
 def run_create_noisy_patterns() -> None:
     """Create noisy versions of all patterns from a selected source folder."""
     default_folder = ensure_patterns_dir()
-    source_input = input(f"Folder to noisify [{default_folder.name}]: ").strip()
-    source_folder = Path(source_input) if source_input else default_folder
-
-    if not source_folder.is_absolute():
-        source_folder = Path(__file__).resolve().parent / source_folder
+    source_folder = prompt_for_folder("noise.source_folder", "Folder to noisify", default_folder)
 
     if not source_folder.exists() or not source_folder.is_dir():
         print(f"Folder not found: {source_folder}")
@@ -201,17 +223,16 @@ def run_create_noisy_patterns() -> None:
         return
 
     created_count = 0
-    for index, source_image in enumerate(source_images, start=1):
-        grid = load_pattern_image(source_image)
-        if grid is None:
-            print(f"Skipping {source_image.name}: expected {GRID_COLS}x{GRID_ROWS} binary pattern PNG.")
+    for source_image in source_images:
+        grid_array = load_binary_png_any_size(source_image)
+        if grid_array is None:
+            print(f"Skipping {source_image.name}: unable to read as a 2D pattern PNG.")
             continue
 
-        noisy_grid = apply_noise_to_grid(grid, noise_percent)
+        noisy_grid = apply_noise_to_grid(grid_array, noise_percent)
         output_path = destination_folder / f"n{noise_label}_{source_image.stem}.png"
-        grid_array = np.asarray(noisy_grid, dtype=np.uint8)
         cmap = ListedColormap(["white", "black"])
-        plt.imsave(output_path, grid_array, cmap=cmap, vmin=0, vmax=1)
+        plt.imsave(output_path, noisy_grid, cmap=cmap, vmin=0, vmax=1)
         created_count += 1
         print(f"Created: {output_path.name}")
 

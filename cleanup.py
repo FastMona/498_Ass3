@@ -1,6 +1,8 @@
 from pathlib import Path
 import shutil
 
+from folder_prefs import PREFS_FILE
+
 
 WORKSPACE_DIR = Path(__file__).resolve().parent
 PATTERNS_DIR = WORKSPACE_DIR / "patterns"
@@ -102,12 +104,24 @@ def run_cleanup() -> None:
         deleted_files, deleted_dirs = delete_other_temp_files(WORKSPACE_DIR)
         print(f"Deleted {deleted_files} temp file(s) and {deleted_dirs} __pycache__ folder(s).")
 
-        keep_last_lines = read_keep_lines_default_100()
-        trim_result = trim_terminal_output_file(TERMINAL_OUT_PATH, keep_last_lines)
-        if trim_result is None:
-            print("Skipped terminal_out.txt trim: file not found.")
+        if confirm_yes_no_default_no("Shorten terminal_out.txt now?"):
+            keep_last_lines = read_keep_lines_default_100()
+            trim_result = trim_terminal_output_file(TERMINAL_OUT_PATH, keep_last_lines)
+            if trim_result is None:
+                print("Skipped terminal_out.txt trim: file not found.")
+            else:
+                before_count, after_count = trim_result
+                print(f"Trimmed terminal_out.txt lines: {before_count} -> {after_count} (kept last {keep_last_lines}).")
         else:
-            before_count, after_count = trim_result
-            print(f"Trimmed terminal_out.txt lines: {before_count} -> {after_count} (kept last {keep_last_lines}).")
+            print("Skipped terminal_out.txt trim.")
     else:
         print("Skipped other temp file cleanup.")
+
+    if confirm_yes_no_default_no("Reset remembered folder defaults?"):
+        if PREFS_FILE.exists() and PREFS_FILE.is_file():
+            PREFS_FILE.unlink(missing_ok=True)
+            print("Cleared remembered folder defaults.")
+        else:
+            print("No remembered folder defaults were found.")
+    else:
+        print("Kept remembered folder defaults.")

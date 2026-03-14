@@ -7,6 +7,7 @@ import numpy as np
 import sys
 
 from terminal_out import install_terminal_output_logger
+from folder_prefs import prompt_for_folder
 
 
 PATTERNS_DIR = Path(__file__).resolve().parent / "patterns"
@@ -111,12 +112,12 @@ def show_gallery_window(
     process.start()
 
 
-def read_binary_row(row_index: int) -> list[int]:
-    """Read one row of GRID_COLS binary characters ('0' or '1')."""
+def read_binary_row(row_index: int, total_rows: int, total_cols: int) -> list[int]:
+    """Read one row of binary characters ('0' or '1') for requested dimensions."""
     while True:
-        row = input(f"Row {row_index + 1}/{GRID_ROWS} ({GRID_COLS} chars of 0 or 1): ").strip()
-        if len(row) != GRID_COLS:
-            print(f"Invalid input: row must be exactly {GRID_COLS} characters.")
+        row = input(f"Row {row_index + 1}/{total_rows} ({total_cols} chars of 0 or 1): ").strip()
+        if len(row) != total_cols:
+            print(f"Invalid input: row must be exactly {total_cols} characters.")
             continue
         if any(ch not in {"0", "1"} for ch in row):
             print("Invalid input: only '0' and '1' are allowed.")
@@ -124,12 +125,12 @@ def read_binary_row(row_index: int) -> list[int]:
         return [int(ch) for ch in row]
 
 
-def read_replacement_row(line_number: int) -> list[int]:
+def read_replacement_row(line_number: int, total_cols: int) -> list[int]:
     """Read replacement data for one selected line in edit mode."""
     while True:
-        row = input(f"New data for line {line_number} ({GRID_COLS} chars of 0 or 1): ").strip()
-        if len(row) != GRID_COLS:
-            print(f"Invalid input: row must be exactly {GRID_COLS} characters.")
+        row = input(f"New data for line {line_number} ({total_cols} chars of 0 or 1): ").strip()
+        if len(row) != total_cols:
+            print(f"Invalid input: row must be exactly {total_cols} characters.")
             continue
         if any(ch not in {"0", "1"} for ch in row):
             print("Invalid input: only '0' and '1' are allowed.")
@@ -137,10 +138,15 @@ def read_replacement_row(line_number: int) -> list[int]:
         return [int(ch) for ch in row]
 
 
-def read_binary_row_or_repeat(row_index: int, previous_row: list[int] | None) -> list[int]:
+def read_binary_row_or_repeat(
+    row_index: int,
+    total_rows: int,
+    total_cols: int,
+    previous_row: list[int] | None,
+) -> list[int]:
     """Read one row, allowing Enter to repeat previous row when available."""
     while True:
-        prompt = f"Row {row_index + 1}/{GRID_ROWS} ({GRID_COLS} chars of 0 or 1, Enter to repeat last): "
+        prompt = f"Row {row_index + 1}/{total_rows} ({total_cols} chars of 0 or 1, Enter to repeat last): "
         row = input(prompt).strip()
         if row == "":
             if previous_row is None:
@@ -152,8 +158,8 @@ def read_binary_row_or_repeat(row_index: int, previous_row: list[int] | None) ->
             sys.stdout.flush()
             return previous_row.copy()
 
-        if len(row) != GRID_COLS:
-            print(f"Invalid input: row must be exactly {GRID_COLS} characters.")
+        if len(row) != total_cols:
+            print(f"Invalid input: row must be exactly {total_cols} characters.")
             continue
         if any(ch not in {"0", "1"} for ch in row):
             print("Invalid input: only '0' and '1' are allowed.")
@@ -161,26 +167,37 @@ def read_binary_row_or_repeat(row_index: int, previous_row: list[int] | None) ->
         return [int(ch) for ch in row]
 
 
-def create_image_grid() -> list[list[int]]:
-    """Read a GRID_ROWS x GRID_COLS binary grid from user input."""
-    print(f"\nCreate {GRID_COLS}x{GRID_ROWS} image")
-    print(f"Enter {GRID_ROWS} rows. Each row must contain exactly {GRID_COLS} characters of 0 or 1.")
-    print(f"Tip: press Enter on rows 2-{GRID_ROWS} to repeat the previous row.")
+def create_image_grid(total_rows: int, total_cols: int) -> list[list[int]]:
+    """Read a binary grid from user input for requested dimensions."""
+    print(f"\nCreate {total_cols}x{total_rows} image")
+    print(f"Enter {total_rows} rows. Each row must contain exactly {total_cols} characters of 0 or 1.")
+    print(f"Tip: press Enter on rows 2-{total_rows} to repeat the previous row.")
 
     grid: list[list[int]] = []
-    for i in range(GRID_ROWS):
+    for i in range(total_rows):
         previous_row = grid[-1] if grid else None
-        grid.append(read_binary_row_or_repeat(i, previous_row))
+        grid.append(read_binary_row_or_repeat(i, total_rows, total_cols, previous_row))
     return grid
 
 
-def read_line_number() -> int:
-    """Read one line number between 1 and GRID_ROWS for edit mode."""
+def read_line_number(total_rows: int) -> int:
+    """Read one line number between 1 and total_rows for edit mode."""
     while True:
-        value = input(f"Enter line number to edit (1-{GRID_ROWS}): ").strip()
-        if value.isdigit() and 1 <= int(value) <= GRID_ROWS:
+        value = input(f"Enter line number to edit (1-{total_rows}): ").strip()
+        if value.isdigit() and 1 <= int(value) <= total_rows:
             return int(value)
-        print(f"Invalid input: line number must be 1-{GRID_ROWS}.")
+        print(f"Invalid input: line number must be 1-{total_rows}.")
+
+
+def read_dimension_value(prompt: str, default_value: int) -> int:
+    """Read a positive dimension integer with a default value."""
+    while True:
+        raw = input(f"{prompt} [{default_value}]: ").strip()
+        if raw == "":
+            return default_value
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+        print("Invalid input: enter a positive whole number.")
 
 
 def ensure_patterns_dir() -> Path:
@@ -238,7 +255,7 @@ def pattern_image_path(folder: Path, base_name: str) -> Path:
 
 
 def load_pattern_image(image_path: Path) -> list[list[int]] | None:
-    """Load editable pattern rows from a GRID_ROWS x GRID_COLS PNG file."""
+    """Load editable pattern rows from a binary PNG file of any size."""
     if not image_path.exists():
         return None
 
@@ -250,7 +267,7 @@ def load_pattern_image(image_path: Path) -> list[list[int]] | None:
     if data.ndim == 3:
         data = data[..., :3].mean(axis=2)
 
-    if data.shape != (GRID_ROWS, GRID_COLS):
+    if data.ndim != 2:
         return None
 
     grid_array = (np.asarray(data) < 0.5).astype(int)
@@ -261,8 +278,10 @@ def load_pattern_image(image_path: Path) -> list[list[int]] | None:
 def display_image_grid(grid: list[list[int]], save_path: Path | None = None) -> None:
     """Display the binary grid where 0=white and 1=black."""
     cmap = ListedColormap(["white", "black"])
+    grid_rows = len(grid)
+    grid_cols = len(grid[0]) if grid_rows > 0 else 0
 
-    image_title = f"Binary Image ({GRID_ROWS} X {GRID_COLS}) (0=white, 1=black)"
+    image_title = f"Binary Image ({grid_rows} X {grid_cols}) (0=white, 1=black)"
 
     if save_path is not None:
         grid_array = np.asarray(grid, dtype=np.uint8)
@@ -295,18 +314,28 @@ def display_recent_patterns(folder: Path) -> None:
     image_titles = [item[0] for item in ordered_items]
     images = [item[1] for item in ordered_items]
 
+    dimensions = {(image.shape[0], image.shape[1]) for image in images}
+    if len(dimensions) == 1:
+        rows, cols = next(iter(dimensions))
+        size_text = f"{rows} X {cols}"
+    else:
+        size_text = "mixed sizes"
+
     show_gallery_window(
         images,
         image_titles,
-        suptitle=f"Original Patterns ({GRID_ROWS} X {GRID_COLS})",
+        suptitle=f"Original Patterns ({size_text})",
         window_title="Most Recent Patterns",
     )
 
 
 def run_create_image() -> None:
     """Create or edit and then display one GRID_ROWS x GRID_COLS binary image."""
-    output_folder = ensure_patterns_dir()
-    edit_name_raw = input("Press Enter for new pattern, enter file name to edit, or '0' to view last 8 patterns: ").strip()
+    default_folder = ensure_patterns_dir()
+    output_folder = prompt_for_folder("create_img.folder", "Folder for patterns", default_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    edit_name_raw = input("File name to create/edit (or '0' to view last 8 patterns): ").strip()
 
     if edit_name_raw == "0":
         display_recent_patterns(output_folder)
@@ -315,25 +344,31 @@ def run_create_image() -> None:
     image: list[list[int]]
     output_path: Path
 
-    if edit_name_raw:
-        edit_base_name = normalize_pattern_base_name(edit_name_raw)
-        edit_image_path = pattern_image_path(output_folder, edit_base_name)
-        loaded_image = load_pattern_image(edit_image_path)
-        if loaded_image is None:
-            print(f"Cannot edit '{edit_name_raw}': missing/invalid {GRID_COLS}x{GRID_ROWS} PNG at {edit_image_path.name}.")
-            print("Create the pattern first using new mode.")
-            return
-        image = loaded_image
+    base_name = normalize_pattern_base_name(edit_name_raw)
+    if not base_name:
+        base_name = get_default_pattern_name(output_folder)
 
-        line_number = read_line_number()
+    edit_image_path = pattern_image_path(output_folder, base_name)
+    loaded_image = load_pattern_image(edit_image_path)
+
+    if loaded_image is not None:
+        image = loaded_image
+        total_rows = len(image)
+        total_cols = len(image[0]) if total_rows > 0 else 0
+        if total_rows <= 0 or total_cols <= 0:
+            print(f"Cannot edit '{base_name}': image has invalid dimensions.")
+            return
+        line_number = read_line_number(total_rows)
         print("Edit mode: only one line is edited per run.")
         print(f"Current row {line_number}: {''.join(str(v) for v in image[line_number - 1])}")
-        replacement = read_replacement_row(line_number)
+        replacement = read_replacement_row(line_number, total_cols)
         image[line_number - 1] = replacement
-        output_path = get_output_path_with_default(output_folder, edit_base_name)
     else:
-        image = create_image_grid()
-        output_path = get_output_path(output_folder)
+        rows = read_dimension_value("Pattern rows", GRID_ROWS)
+        cols = read_dimension_value("Pattern cols", GRID_COLS)
+        image = create_image_grid(rows, cols)
+
+    output_path = get_output_path_with_default(output_folder, base_name)
 
     display_image_grid(image, save_path=output_path)
 
