@@ -1,6 +1,6 @@
 {
-  "noise.source_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\pattern_Xta_14_12",
-  "hopfield.training_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\pattern_Xta_14_12",
+  "noise.source_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
+  "hopfield.training_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
   "hopfield.test_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\noisy_patterns",
   "hopfield.reference_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\pattern_Xta_14_12",
   "utilities.view_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_120_100",

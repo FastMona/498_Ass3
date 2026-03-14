@@ -10,6 +10,10 @@ from create_img_folder import run_create_img_folder_utility
 from folder_prefs import prompt_for_folder
 
 
+MODELS_DIR = Path(__file__).resolve().parent / "nn_models"
+LAST_HOPA_STAGES_PATH = MODELS_DIR / "LAST_HOPA_STAGES.npz"
+
+
 def _workspace_dir() -> Path:
     return Path(__file__).resolve().parent
 
@@ -88,6 +92,209 @@ def show_gallery_window(
         daemon=True,
     )
     process.start()
+
+
+def _show_animation_window_process(
+    stage_sequences: list[np.ndarray],
+    file_names: list[str],
+    window_title: str,
+    interval_ms: int,
+) -> None:
+    """Render all pattern stage sequences in a 2x4 animated gallery."""
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
+    if not stage_sequences:
+        return
+
+    frame_counts = [int(sequence.shape[0]) for sequence in stage_sequences]
+    max_frame_count = max(frame_counts)
+
+    cmap = ListedColormap(["white", "black"])
+    fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+    _set_window_title(fig, window_title)
+    axes_flat = axes.flatten()
+
+    image_artists = []
+    title_texts = []
+    for index, axis in enumerate(axes_flat):
+        if index >= len(stage_sequences):
+            axis.axis("off")
+            image_artists.append(None)
+            title_texts.append(None)
+            continue
+
+        sequence = stage_sequences[index]
+        image_artist = axis.imshow(sequence[0], cmap=cmap, vmin=0, vmax=1)
+        axis.set_xticks([])
+        axis.set_yticks([])
+        frame_total = max(1, int(sequence.shape[0]) - 1)
+        title_text = axis.set_title(f"{file_names[index]} | step 0/{frame_total}")
+        image_artists.append(image_artist)
+        title_texts.append(title_text)
+
+    suptitle = fig.suptitle(f"Global step 0/{max_frame_count - 1}")
+
+    def update(global_frame_index: int):
+        artists = []
+        for index, sequence in enumerate(stage_sequences):
+            local_frame_index = min(global_frame_index, int(sequence.shape[0]) - 1)
+            image_artist = image_artists[index]
+            title_text = title_texts[index]
+            if image_artist is None or title_text is None:
+                continue
+            image_artist.set_data(sequence[local_frame_index])
+            frame_total = max(1, int(sequence.shape[0]) - 1)
+            title_text.set_text(f"{file_names[index]} | step {local_frame_index}/{frame_total}")
+            artists.extend([image_artist, title_text])
+
+        suptitle.set_text(f"Global step {global_frame_index}/{max_frame_count - 1}")
+        artists.append(suptitle)
+        return artists
+
+    anim = FuncAnimation(
+        fig,
+        update,
+        frames=max_frame_count,
+        interval=interval_ms,
+        repeat=False,
+        blit=False,
+    )
+    # Keep a strong reference for the lifetime of the window.
+    fig._hopa_stage_anim = anim
+    plt.tight_layout()
+    plt.show()
+
+
+def show_animation_window(
+    stage_sequences: list[np.ndarray],
+    file_names: list[str],
+    window_title: str,
+    interval_ms: int,
+) -> None:
+    """Start a process that animates all recalled stage sequences."""
+    context = get_context("spawn")
+    process = context.Process(
+        target=_show_animation_window_process,
+        args=(
+            [np.asarray(sequence, dtype=np.uint8) for sequence in stage_sequences],
+            file_names,
+            window_title,
+            interval_ms,
+        ),
+        daemon=True,
+    )
+    process.start()
+
+
+def _load_latest_hopa_stage_snapshot() -> dict[str, object] | None:
+    """Load latest HOPA intermediate snapshot produced by Option 4."""
+    if not LAST_HOPA_STAGES_PATH.exists():
+        return None
+
+    try:
+        data = np.load(LAST_HOPA_STAGES_PATH, allow_pickle=True)
+    except OSError:
+        return None
+
+    required_common = {"run_folder", "file_names", "stages", "grid_rows", "grid_cols"}
+    if not required_common.issubset(set(data.files)):
+        return None
+
+    file_names = [str(name) for name in np.asarray(data["file_names"]).tolist()]
+    grid_rows = int(data["grid_rows"])
+    grid_cols = int(data["grid_cols"])
+
+    if "frame_counts" in data.files:
+        stages_raw = np.asarray(data["stages"], dtype=object)
+        frame_counts = np.asarray(data["frame_counts"], dtype=int)
+
+        if stages_raw.ndim != 1:
+            return None
+        if stages_raw.shape[0] != len(file_names):
+            return None
+        if frame_counts.shape[0] != len(file_names):
+            return None
+
+        stage_sequences: list[np.ndarray] = []
+        for index, raw_stage_array in enumerate(stages_raw):
+            stage_array = np.asarray(raw_stage_array, dtype=np.uint8)
+            if stage_array.ndim != 3:
+                return None
+            if stage_array.shape[1:] != (grid_rows, grid_cols):
+                return None
+            if int(frame_counts[index]) != int(stage_array.shape[0]):
+                return None
+            stage_sequences.append(stage_array)
+    else:
+        # Backward-compatible load for older snapshots with fixed stage_count.
+        if "stage_count" not in data.files:
+            return None
+
+        stage_stack = np.asarray(data["stages"], dtype=np.uint8)
+        stage_count = int(data["stage_count"])
+        if stage_stack.ndim != 4:
+            return None
+        if stage_stack.shape[0] != len(file_names):
+            return None
+        if stage_stack.shape[1] != stage_count:
+            return None
+        if stage_stack.shape[2:] != (grid_rows, grid_cols):
+            return None
+
+        stage_sequences = [stage_stack[index] for index in range(stage_stack.shape[0])]
+        frame_counts = np.full(stage_stack.shape[0], stage_count, dtype=int)
+
+    return {
+        "run_folder": str(data["run_folder"]),
+        "file_names": file_names,
+        "stages": stage_sequences,
+        "frame_counts": frame_counts,
+        "grid_rows": grid_rows,
+        "grid_cols": grid_cols,
+    }
+
+
+def _read_animation_interval_ms() -> int:
+    """Read animation frame interval in milliseconds."""
+    while True:
+        value = input("Animation speed in ms per frame [350]: ").strip()
+        if value == "":
+            return 350
+        if value.isdigit() and int(value) > 0:
+            return int(value)
+        print("Invalid input: enter a positive integer.")
+
+
+def run_view_hopa_intermediate_animation_utility() -> None:
+    """Display latest captured HOPA intermediate recall stages as animation."""
+    snapshot = _load_latest_hopa_stage_snapshot()
+    if snapshot is None:
+        print("No HOPA stage snapshot found. Run option 4 recall first.")
+        return
+
+    file_names = list(snapshot["file_names"])
+    frame_counts = np.asarray(snapshot["frame_counts"], dtype=int)
+    run_folder = str(snapshot["run_folder"])
+    stages = list(snapshot["stages"])
+
+    if not file_names:
+        print("Snapshot has no patterns to show.")
+        return
+
+    print(f"Latest run folder: {run_folder}")
+    print(f"Patterns captured: {len(file_names)}")
+    print("Animating all captured patterns until the last one settles.")
+
+    interval_ms = _read_animation_interval_ms()
+    stage_sequences = [np.asarray(sequence, dtype=np.uint8) for sequence in stages]
+
+    show_animation_window(
+        stage_sequences,
+        file_names,
+        window_title="HOPA Intermediate Stages (All Patterns)",
+        interval_ms=interval_ms,
+    )
 
 
 def _read_positive_int(prompt: str) -> int:
@@ -230,8 +437,8 @@ def show_utilities_menu() -> None:
     print("1. Upsize pattern images (pad right and bottom)")
     print("2. View folder images")
     print("3. Create 8 clean pixelated character images")
-    for option in range(4, 6):
-        print(f"{option}. Not implemented")
+    print("4. View latest HOPA intermediate recall animation")
+    print("5. Not implemented")
     print("0. Back")
 
 
@@ -247,9 +454,11 @@ def run_utilities_menu() -> None:
             run_view_folder_images_utility()
         elif choice == "3":
             run_create_img_folder_utility()
+        elif choice == "4":
+            run_view_hopa_intermediate_animation_utility()
         elif choice == "0":
             return
-        elif choice.isdigit() and 4 <= int(choice) <= 5:
+        elif choice == "5":
             print("This utility is not implemented yet.")
         else:
             print("Invalid choice. Please enter 0-5.")

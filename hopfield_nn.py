@@ -1,6 +1,8 @@
 from math import sqrt
 from pathlib import Path
 from typing import cast
+from datetime import datetime
+import shutil
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -20,6 +22,8 @@ DEFAULT_ACTIVATION = "sign"
 DEFAULT_LEARNING_MODE = "hebbian"
 DEFAULT_RECALL_TEST_FOLDER = "noisy_patterns"
 RECALL_PATTERNS_DIR = Path(__file__).resolve().parent / "recall_patterns"
+TEMP_PATTERNS_DIR = Path(__file__).resolve().parent / "temp_patterns"
+LAST_HOPA_STAGES_PATH = MODELS_DIR / "LAST_HOPA_STAGES.npz"
 
 
 def _set_window_title(fig, window_title: str | None) -> None:
@@ -306,6 +310,20 @@ def ensure_recall_patterns_dir() -> Path:
     """Ensure recalled patterns output folder exists and return its path."""
     RECALL_PATTERNS_DIR.mkdir(exist_ok=True)
     return RECALL_PATTERNS_DIR
+
+
+def ensure_temp_patterns_dir() -> Path:
+    """Ensure temporary intermediate-stage output folder exists."""
+    TEMP_PATTERNS_DIR.mkdir(exist_ok=True)
+    return TEMP_PATTERNS_DIR
+
+
+def reset_temp_patterns_dir() -> Path:
+    """Clear all prior intermediate-stage output and recreate temp folder."""
+    if TEMP_PATTERNS_DIR.exists():
+        shutil.rmtree(TEMP_PATTERNS_DIR, ignore_errors=True)
+    TEMP_PATTERNS_DIR.mkdir(exist_ok=True)
+    return TEMP_PATTERNS_DIR
 
 
 def save_network_params(
@@ -618,6 +636,93 @@ def save_recalled_patterns(test_files: list[Path], recalled_grids: list[np.ndarr
     return saved_count
 
 
+def recall_asynchronous_pixel_stages_until_stable(
+    network: HopfieldNetwork,
+    pattern: np.ndarray,
+    rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Capture HOPA states after each pixel update until a full sweep makes no changes."""
+    state = pattern.copy()
+    stages = [state.copy()]
+
+    while True:
+        changed_this_sweep = False
+        order = rng.permutation(network.size)
+        for neuron_index in order:
+            activation = np.dot(network.weights[neuron_index], state)
+            new_value = int(network.apply_activation(np.array([activation]))[0])
+            if int(state[neuron_index]) != new_value:
+                state[neuron_index] = new_value
+                stages.append(state.copy())
+                changed_this_sweep = True
+
+        if not changed_this_sweep:
+            break
+
+    return stages
+
+
+def _save_hopa_stage_images_for_pattern(run_folder: Path, pattern_stem: str, stage_grids: np.ndarray) -> int:
+    """Save stage grids for one pattern as ordered PNG frames."""
+    pattern_folder = run_folder / pattern_stem
+    pattern_folder.mkdir(exist_ok=True)
+    cmap = ListedColormap(["white", "black"])
+
+    for stage_index, stage_grid in enumerate(stage_grids):
+        if stage_index == 0:
+            stage_name = f"step_{stage_index:03d}_noisy.png"
+        elif stage_index == int(stage_grids.shape[0]) - 1:
+            stage_name = f"step_{stage_index:03d}_recalled.png"
+        else:
+            stage_name = f"step_{stage_index:03d}.png"
+
+        output_path = pattern_folder / stage_name
+        plt.imsave(output_path, stage_grid, cmap=cmap, vmin=0, vmax=1)
+
+    return int(stage_grids.shape[0])
+
+
+def save_hopa_intermediate_stages(
+    test_folder: Path,
+    valid_files: list[Path],
+    hopa_stage_grids: list[np.ndarray],
+    grid_shape: tuple[int, int],
+) -> Path | None:
+    """Persist latest HOPA intermediate recall stages to temp folder and snapshot npz."""
+    if not valid_files or not hopa_stage_grids:
+        return None
+
+    ensure_models_dir()
+    reset_temp_patterns_dir()
+    run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    run_folder = ensure_temp_patterns_dir() / run_name
+    run_folder.mkdir(exist_ok=True)
+
+    stage_arrays = [np.asarray(stages, dtype=np.uint8) for stages in hopa_stage_grids]
+    frame_counts = np.asarray([int(stage_array.shape[0]) for stage_array in stage_arrays], dtype=int)
+    stage_objects = np.empty(len(stage_arrays), dtype=object)
+    for index, stage_array in enumerate(stage_arrays):
+        stage_objects[index] = stage_array
+
+    file_names = np.asarray([file_path.name for file_path in valid_files], dtype=str)
+
+    for file_path, stage_grids in zip(valid_files, stage_arrays):
+        _save_hopa_stage_images_for_pattern(run_folder, file_path.stem, stage_grids)
+
+    np.savez(
+        LAST_HOPA_STAGES_PATH,
+        run_folder=str(run_folder),
+        test_folder=str(test_folder),
+        file_names=file_names,
+        stages=stage_objects,
+        frame_counts=frame_counts,
+        grid_rows=grid_shape[0],
+        grid_cols=grid_shape[1],
+    )
+
+    return run_folder
+
+
 def run_pattern_recall() -> None:
     """Recall up to 8 patterns from a test folder using both trained models."""
     print("\n=== Pattern Recall ===")
@@ -658,10 +763,13 @@ def run_pattern_recall() -> None:
         return
 
     model_shape = hops_shape
+    print("Capturing HOPA intermediate stages pixel-by-pixel until stable state...")
 
     hops_recalled_grids: list[np.ndarray] = []
     hopa_recalled_grids: list[np.ndarray] = []
+    hopa_intermediate_grids: list[np.ndarray] = []
     valid_files: list[Path] = []
+    recall_rng = np.random.default_rng(42)
 
     for test_file in test_files:
         grid_array = load_binary_png_any_size(test_file)
@@ -677,9 +785,19 @@ def run_pattern_recall() -> None:
 
         vector = np.where(grid_array.reshape(-1) == 1, 1, -1)
         hops_recalled = hops_network.recall_synchronous(vector, steps=1)
-        hopa_recalled = hopa_network.recall_asynchronous(vector, steps=1)
+        hopa_stages = recall_asynchronous_pixel_stages_until_stable(
+            hopa_network,
+            vector,
+            rng=recall_rng,
+        )
+        hopa_recalled = hopa_stages[-1]
         hops_recalled_grids.append(bipolar_vector_to_grid(hops_recalled, model_shape))
         hopa_recalled_grids.append(bipolar_vector_to_grid(hopa_recalled, model_shape))
+        hopa_stage_stack = np.stack(
+            [bipolar_vector_to_grid(stage, model_shape) for stage in hopa_stages],
+            axis=0,
+        )
+        hopa_intermediate_grids.append(hopa_stage_stack)
         valid_files.append(test_file)
 
     if not hops_recalled_grids:
@@ -692,6 +810,16 @@ def run_pattern_recall() -> None:
     saved_hops = save_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
     saved_hopa = save_recalled_patterns(valid_files, hopa_recalled_grids, "HOPA")
     print(f"Saved recalled images: HOPS={saved_hops}, HOPA={saved_hopa} in {ensure_recall_patterns_dir()}")
+
+    temp_run_folder = save_hopa_intermediate_stages(
+        test_folder,
+        valid_files,
+        hopa_intermediate_grids,
+        model_shape,
+    )
+    if temp_run_folder is not None:
+        print(f"Saved HOPA intermediate stages in: {temp_run_folder}")
+        print(f"Latest HOPA stage snapshot saved: {LAST_HOPA_STAGES_PATH.name}")
 
     display_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
     display_recalled_patterns(valid_files, hopa_recalled_grids, "HOPA")
