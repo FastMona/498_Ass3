@@ -435,13 +435,181 @@ def run_view_folder_images_utility() -> None:
     )
 
 
+def run_bit_frequency_report_utility() -> None:
+    """Compute per-bit one frequency across folder PNGs and SD over bit frequencies."""
+    default_folder = ensure_patterns_dir()
+    source_folder = _resolve_folder_input(default_folder, "Folder to analyze")
+
+    if not source_folder.exists() or not source_folder.is_dir():
+        print(f"Folder not found: {source_folder}")
+        return
+
+    image_files = sorted(source_folder.glob("*.png"))
+    if not image_files:
+        print(f"No PNG images found in: {source_folder}")
+        return
+
+    grids: list[np.ndarray] = []
+    used_files: list[Path] = []
+    expected_shape: tuple[int, int] | None = None
+
+    for image_path in image_files:
+        grid = _load_binary_png_any_size(image_path)
+        if grid is None:
+            print(f"Skipping {image_path.name}: unable to read as 2D PNG.")
+            continue
+
+        shape = (int(grid.shape[0]), int(grid.shape[1]))
+        if expected_shape is None:
+            expected_shape = shape
+        elif shape != expected_shape:
+            print(
+                f"Skipping {image_path.name}: size {shape[0]}x{shape[1]} does not match "
+                f"expected {expected_shape[0]}x{expected_shape[1]}."
+            )
+            continue
+
+        grids.append(grid.astype(np.uint8, copy=False))
+        used_files.append(image_path)
+
+    if not grids or expected_shape is None:
+        print("No valid same-size PNG images found to analyze.")
+        return
+
+    stack = np.stack(grids, axis=0)
+    image_count = int(stack.shape[0])
+    rows, cols = expected_shape
+
+    one_counts = np.sum(stack, axis=0).astype(int)
+    one_frequency = one_counts / float(image_count)
+
+    freq_flat = one_frequency.reshape(-1)
+    counts_flat = one_counts.reshape(-1)
+
+    freq_mean = float(np.mean(freq_flat))
+    freq_sd = float(np.std(freq_flat, ddof=0))
+    freq_min = float(np.min(freq_flat))
+    freq_max = float(np.max(freq_flat))
+
+    print()
+    print("=== Bit Frequency Report ===")
+    print(f"Folder: {source_folder}")
+    print(f"Images analyzed: {image_count}")
+    print(f"Grid size: {rows}x{cols} ({rows * cols} bits)")
+    print(f"Mean bit frequency of 1s: {freq_mean:.4f}")
+    print(f"SD of bit-frequency distribution: {freq_sd:.4f}")
+    print(f"Min/Max bit frequency: {freq_min:.4f} / {freq_max:.4f}")
+
+    output_path = source_folder / "bit_frequency_report.csv"
+    with output_path.open("w", encoding="utf-8", newline="") as report_file:
+        report_file.write("bit_index,row,col,ones_count,frequency\n")
+        for bit_index, (count_value, freq_value) in enumerate(zip(counts_flat, freq_flat), start=1):
+            row_index = (bit_index - 1) // cols
+            col_index = (bit_index - 1) % cols
+            report_file.write(
+                f"{bit_index},{row_index},{col_index},{int(count_value)},{float(freq_value):.6f}\n"
+            )
+
+    print(f"Saved per-bit frequencies to: {output_path}")
+
+
+def run_downsize_patterns_utility() -> None:
+    """Remove uniform trailing all-zero rows and columns, keeping all images same size."""
+    default_folder = ensure_patterns_dir()
+    source_folder = _resolve_source_folder(default_folder)
+
+    if not source_folder.exists() or not source_folder.is_dir():
+        print(f"Folder not found: {source_folder}")
+        return
+
+    source_images = sorted(source_folder.glob("*.png"))
+    if not source_images:
+        print(f"No PNG images found in: {source_folder}")
+        return
+
+    # Load all grids and count trailing zeros for each
+    grids: list[np.ndarray] = []
+    trim_rows_per_image: list[int] = []
+    trim_cols_per_image: list[int] = []
+    valid_files: list[Path] = []
+
+    for source_image in source_images:
+        grid = _load_binary_png_any_size(source_image)
+        if grid is None:
+            print(f"Skipping {source_image.name}: unable to read as 2D PNG.")
+            continue
+
+        original_rows, original_cols = grid.shape
+        
+        # Count trailing all-zero rows from bottom
+        trim_rows = 0
+        for row_idx in range(original_rows - 1, -1, -1):
+            if np.all(grid[row_idx, :] == 0):
+                trim_rows += 1
+            else:
+                break
+        
+        # Count trailing all-zero columns from right
+        trim_cols = 0
+        for col_idx in range(original_cols - 1, -1, -1):
+            if np.all(grid[:, col_idx] == 0):
+                trim_cols += 1
+            else:
+                break
+        
+        grids.append(grid)
+        trim_rows_per_image.append(trim_rows)
+        trim_cols_per_image.append(trim_cols)
+        valid_files.append(source_image)
+
+    if not grids:
+        print("No valid PNG images found.")
+        return
+
+    # Find minimum trim amounts that apply to all images
+    min_trim_rows = min(trim_rows_per_image)
+    min_trim_cols = min(trim_cols_per_image)
+
+    if min_trim_rows == 0 and min_trim_cols == 0:
+        print("No images have trailing zero rows/columns in common. Skipping.")
+        return
+
+    destination_name = "patterns_trimmed"
+    destination_folder = source_folder.parent / destination_name
+    destination_folder.mkdir(exist_ok=True)
+
+    cmap = ListedColormap(["white", "black"])
+    created_count = 0
+
+    for grid, source_image in zip(grids, valid_files):
+        original_rows, original_cols = grid.shape
+        new_rows = original_rows - min_trim_rows
+        new_cols = original_cols - min_trim_cols
+        trimmed_grid = grid[:new_rows, :new_cols]
+        
+        output_name = f"trim_{source_image.name}"
+        output_path = destination_folder / output_name
+        plt.imsave(output_path, trimmed_grid, cmap=cmap, vmin=0, vmax=1)
+        created_count += 1
+        print(
+            f"Created: {output_path.name} "
+            f"({original_rows}x{original_cols} -> {new_rows}x{new_cols})"
+        )
+
+    print(
+        f"Downsize complete: {created_count} file(s) created in {destination_folder}. "
+        f"All output images are {new_rows}x{new_cols} (removed {min_trim_rows}R {min_trim_cols}C)."
+    )
+
+
 def show_utilities_menu() -> None:
     print("\n=== Utilities ===")
     print("1. Upsize pattern images (pad right and bottom)")
     print("2. View folder images")
     print("3. Create 8 clean pixelated character images")
     print("4. View latest HOPA intermediate recall animation")
-    print("5. Not implemented")
+    print("5. Bit frequency + SD report")
+    print("6. Downsize pattern images (trim trailing zero rows/columns)")
     print("0. Back")
 
 
@@ -459,9 +627,11 @@ def run_utilities_menu() -> None:
             run_create_img_folder_utility()
         elif choice == "4":
             run_view_hopa_intermediate_animation_utility()
+        elif choice == "5":
+            run_bit_frequency_report_utility()
+        elif choice == "6":
+            run_downsize_patterns_utility()
         elif choice == "0":
             return
-        elif choice == "5":
-            print("This utility is not implemented yet.")
         else:
-            print("Invalid choice. Please enter 0-5.")
+            print("Invalid choice. Please enter 0-6.")

@@ -38,10 +38,8 @@ def _save_prefs(prefs: dict[str, str]) -> None:
 
 
 def _display_path(path_value: Path, workspace_dir: Path) -> str:
-    try:
-        return str(path_value.relative_to(workspace_dir))
-    except ValueError:
-        return str(path_value)
+    del workspace_dir
+    return path_value.name or str(path_value)
 
 
 def _resolve_default_path(pref_key: str, fallback_folder: Path) -> Path:

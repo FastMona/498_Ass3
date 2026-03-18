@@ -1,9 +1,12 @@
 {
-  "noise.source_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
-  "hopfield.training_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
+  "noise.source_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_trimmed",
+  "hopfield.training_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_trimmed",
   "hopfield.test_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\noisy_patterns",
-  "hopfield.reference_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\pattern_Xta_14_12",
+  "hopfield.reference_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
   "utilities.view_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_120_100",
-  "create_img.folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
-  "utilities.process_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_120_100"
+  "create_img.folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_trimmed",
+  "utilities.process_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_2",
+  "utilities.generic_folder": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_2",
+  "utilities.compare_set_a": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns",
+  "utilities.compare_set_b": "C:\\Users\\David\\Documents_local\\Repository_local\\PythonProjects\\498_Ass3\\patterns_Alpa_12_10"
 }

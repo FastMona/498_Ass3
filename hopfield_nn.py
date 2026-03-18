@@ -312,6 +312,11 @@ def ensure_recall_patterns_dir() -> Path:
     return RECALL_PATTERNS_DIR
 
 
+def _folder_label(path_value: Path) -> str:
+    """Return only the folder name for concise terminal output."""
+    return path_value.name or str(path_value)
+
+
 def ensure_temp_patterns_dir() -> Path:
     """Ensure temporary intermediate-stage output folder exists."""
     TEMP_PATTERNS_DIR.mkdir(exist_ok=True)
@@ -730,7 +735,7 @@ def run_pattern_recall() -> None:
     test_folder = prompt_for_folder("hopfield.test_folder", "Folder to test", default_test_folder)
 
     if not test_folder.exists() or not test_folder.is_dir():
-        print(f"Folder not found: {test_folder}")
+        print(f"Folder not found: {_folder_label(test_folder)}")
         return
 
     hops_network = load_network_from_file(HOPS_MODEL_PATH)
@@ -743,6 +748,28 @@ def run_pattern_recall() -> None:
         print("Trained HOPA model not found or invalid. Run option 3 first.")
         return
 
+    hops_meta = load_model_metadata(HOPS_MODEL_PATH)
+    hopa_meta = load_model_metadata(HOPA_MODEL_PATH)
+
+    hops_activation = (hops_meta["activation"] if hops_meta is not None else hops_network.activation).upper()
+    hopa_activation = (hopa_meta["activation"] if hopa_meta is not None else hopa_network.activation).upper()
+    hops_learning = _learning_mode_abbrev(
+        hops_meta["learning_mode"] if hops_meta is not None else "unknown"
+    )
+    hopa_learning = _learning_mode_abbrev(
+        hopa_meta["learning_mode"] if hopa_meta is not None else "unknown"
+    )
+
+    if hops_activation == hopa_activation:
+        header_activation = hops_activation
+    else:
+        header_activation = f"HOPS:{hops_activation}/HOPA:{hopa_activation}"
+
+    if hops_learning == hopa_learning:
+        header_learning = hops_learning
+    else:
+        header_learning = f"HOPS:{hops_learning}/HOPA:{hopa_learning}"
+
     test_files = sorted(
         test_folder.glob("*.png"),
         key=lambda file_path: file_path.stat().st_mtime,
@@ -750,7 +777,7 @@ def run_pattern_recall() -> None:
     )[:8]
 
     if not test_files:
-        print(f"No PNG images found in: {test_folder}")
+        print(f"No PNG images found in: {_folder_label(test_folder)}")
         return
 
     hops_shape = resolve_model_grid_shape(HOPS_MODEL_PATH, hops_network, test_files)
@@ -809,7 +836,10 @@ def run_pattern_recall() -> None:
 
     saved_hops = save_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
     saved_hopa = save_recalled_patterns(valid_files, hopa_recalled_grids, "HOPA")
-    print(f"Saved recalled images: HOPS={saved_hops}, HOPA={saved_hopa} in {ensure_recall_patterns_dir()}")
+    print(
+        f"Saved recalled images: HOPS={saved_hops}, HOPA={saved_hopa} "
+        f"in {_folder_label(ensure_recall_patterns_dir())}"
+    )
 
     temp_run_folder = save_hopa_intermediate_stages(
         test_folder,
@@ -818,7 +848,7 @@ def run_pattern_recall() -> None:
         model_shape,
     )
     if temp_run_folder is not None:
-        print(f"Saved HOPA intermediate stages in: {temp_run_folder}")
+        print(f"Saved HOPA intermediate stages in: {_folder_label(temp_run_folder)}")
         print(f"Latest HOPA stage snapshot saved: {LAST_HOPA_STAGES_PATH.name}")
 
     display_recalled_patterns(valid_files, hops_recalled_grids, "HOPS")
@@ -857,6 +887,39 @@ def read_monte_carlo_run_count() -> int:
         if value.isdigit() and int(value) > 0:
             return int(value)
         print("Invalid input: enter a positive integer.")
+
+
+def read_monte_carlo_noise_percent() -> float:
+    """Read noise percent for Monte Carlo synthetic noisy sampling."""
+    while True:
+        value = input("Noise percent per run [20]: ").strip()
+        if value == "":
+            return 20.0
+        try:
+            noise_percent = float(value)
+        except ValueError:
+            print("Invalid input: enter a number between 0 and 100.")
+            continue
+
+        if 0.0 <= noise_percent <= 100.0:
+            return noise_percent
+
+        print("Invalid input: noise percent must be between 0 and 100.")
+
+
+def read_monte_carlo_base_seed() -> int:
+    """Read base RNG seed for Monte Carlo runs; blank chooses a time-varying seed."""
+    while True:
+        value = input("Base seed [blank=random]: ").strip()
+        if value == "":
+            random_seed = int(np.random.default_rng().integers(0, 2**31 - 1))
+            print(f"Using random base seed: {random_seed}")
+            return random_seed
+
+        if value.lstrip("+-").isdigit():
+            return int(value)
+
+        print("Invalid input: enter an integer seed, or press Enter for random.")
 
 
 def _read_activation_index(prompt: str, allowed: set[int], default_value: int) -> int:
@@ -1017,6 +1080,27 @@ def _safe_div(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
+def _apply_noise_to_grid_with_rng(
+    grid_array: np.ndarray,
+    noise_percent: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Flip approximately noise_percent bits in a 2D binary grid using provided RNG."""
+    if grid_array.ndim != 2:
+        raise ValueError("Expected a 2D grid array.")
+
+    total_bits = int(grid_array.size)
+    flip_count = int(round((noise_percent / 100.0) * total_bits))
+    if flip_count <= 0:
+        return grid_array.copy()
+
+    flip_count = min(flip_count, total_bits)
+    flat_indices = rng.choice(total_bits, size=flip_count, replace=False)
+    flat_grid = grid_array.reshape(-1).copy()
+    flat_grid[flat_indices] = 1 - flat_grid[flat_indices]
+    return flat_grid.reshape(grid_array.shape)
+
+
 def _binary_confusion_counts(reference: np.ndarray, predicted: np.ndarray) -> tuple[int, int, int, int]:
     """Return TP, FP, FN, TN counts for binary grids where 1 is the positive class."""
     tp = int(np.count_nonzero((predicted == 1) & (reference == 1)))
@@ -1038,7 +1122,7 @@ def run_repeat_recall_report() -> None:
     test_folder = prompt_for_folder("hopfield.test_folder", "Folder to test", default_test_folder)
 
     if not test_folder.exists() or not test_folder.is_dir():
-        print(f"Folder not found: {test_folder}")
+        print(f"Folder not found: {_folder_label(test_folder)}")
         return
 
     repeat_count = read_repeat_count()
@@ -1053,6 +1137,28 @@ def run_repeat_recall_report() -> None:
         print("Trained HOPA model not found or invalid. Run option 3 first.")
         return
 
+    hops_meta = load_model_metadata(HOPS_MODEL_PATH)
+    hopa_meta = load_model_metadata(HOPA_MODEL_PATH)
+
+    hops_activation = (hops_meta["activation"] if hops_meta is not None else hops_network.activation).upper()
+    hopa_activation = (hopa_meta["activation"] if hopa_meta is not None else hopa_network.activation).upper()
+    hops_learning = _learning_mode_abbrev(
+        hops_meta["learning_mode"] if hops_meta is not None else "unknown"
+    )
+    hopa_learning = _learning_mode_abbrev(
+        hopa_meta["learning_mode"] if hopa_meta is not None else "unknown"
+    )
+
+    if hops_activation == hopa_activation:
+        header_activation = hops_activation
+    else:
+        header_activation = f"HOPS:{hops_activation}/HOPA:{hopa_activation}"
+
+    if hops_learning == hopa_learning:
+        header_learning = hops_learning
+    else:
+        header_learning = f"HOPS:{hops_learning}/HOPA:{hopa_learning}"
+
     test_files = sorted(
         test_folder.glob("*.png"),
         key=lambda file_path: file_path.stat().st_mtime,
@@ -1060,7 +1166,7 @@ def run_repeat_recall_report() -> None:
     )[:8]
 
     if not test_files:
-        print(f"No PNG images found in: {test_folder}")
+        print(f"No PNG images found in: {_folder_label(test_folder)}")
         return
 
     hops_shape = resolve_model_grid_shape(HOPS_MODEL_PATH, hops_network, test_files)
@@ -1162,30 +1268,10 @@ def run_repeat_recall_report() -> None:
     print(f"Files used: {len(test_cases)} (up to 8)")
     print(f"Images evaluated: {total_images_evaluated}")
     print(f"Pixels evaluated per model: {total_pixels_evaluated}")
-    print(f"Test Folder: {test_folder}")
+    print(f"Test Folder: {_folder_label(test_folder)}")
     print()
 
-    model_col_width = len("Model")
-    avg_err_col_title = "Avg. ± SD"
-    avg_err_col_width = len(avg_err_col_title)
-
-    avg_error_texts: dict[str, str] = {}
-    for model_name in ("HOPA", "HOPS"):
-        repeat_errors = np.asarray(per_repeat_errors[model_name], dtype=float)
-        avg_errors = float(np.mean(repeat_errors))
-        std_errors = float(np.std(repeat_errors))
-        avg_text = f"{avg_errors:.2f} ± {std_errors:.2f}"
-        avg_error_texts[model_name] = avg_text
-        avg_err_col_width = max(avg_err_col_width, len(avg_text))
-
-    header = (
-        f"{'Model':<{model_col_width}}  "
-        f"{avg_err_col_title:>{avg_err_col_width}}  "
-        f"{'P':>10}  {'R':>10}  {'S':>10}  {'F':>10}"
-    )
-    print(header)
-    print("-" * len(header))
-
+    report_rows: list[list[str]] = []
     for model_name in ("HOPA", "HOPS"):
         totals = model_totals[model_name]
         tp = totals["tp"]
@@ -1197,22 +1283,72 @@ def run_repeat_recall_report() -> None:
         recall = _safe_div(tp, tp + fn)
         specificity = _safe_div(tn, tn + fp)
         f_score = _safe_div(2 * precision * recall, precision + recall)
-        avg_error_text = avg_error_texts[model_name]
+        repeat_errors = np.asarray(per_repeat_errors[model_name], dtype=float)
+        avg_errors = float(np.mean(repeat_errors))
+        std_errors = float(np.std(repeat_errors))
 
-        print(
-            f"{model_name:<{model_col_width}}  "
-            f"{avg_error_text:>{avg_err_col_width}}  "
-            f"{_format_float_cell(precision)}  "
-            f"{_format_float_cell(recall)}  "
-            f"{_format_float_cell(specificity)}  "
-            f"{_format_float_cell(f_score)}"
+        report_rows.append(
+            [
+                model_name,
+                f"{avg_errors:.2f} +/- {std_errors:.2f}",
+                _format_float_cell(precision).strip(),
+                _format_float_cell(recall).strip(),
+                _format_float_cell(specificity).strip(),
+                _format_float_cell(f_score).strip(),
+            ]
         )
+
+    headers = ["Model", "Avg Error +/- SD", "P", "R", "S", "F1"]
+    widths = [len(header) for header in headers]
+    for row in report_rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    header = "  ".join(
+        [
+            f"{headers[0]:<{widths[0]}}",
+            f"{headers[1]:>{widths[1]}}",
+            f"{headers[2]:>{widths[2]}}",
+            f"{headers[3]:>{widths[3]}}",
+            f"{headers[4]:>{widths[4]}}",
+            f"{headers[5]:>{widths[5]}}",
+        ]
+    )
+    title_main = f"REPEAT RECALL ERROR TABLE - ACT={header_activation} - LRN={header_learning}"
+    title_info = (
+        f"RUNS={repeat_count} | FILES={len(test_cases)} | "
+        f"IMAGES={total_images_evaluated} | PIXELS={total_pixels_evaluated}"
+    )
+    title_border = "=" * max(len(title_main), len(title_info), len(header))
+
+    print(title_border)
+    print(title_main)
+    print(title_info)
+    print(title_border)
+    print(header)
+    print("-" * len(header))
+
+    for row in report_rows:
+        print(
+            "  ".join(
+                [
+                    f"{row[0]:<{widths[0]}}",
+                    f"{row[1]:>{widths[1]}}",
+                    f"{row[2]:>{widths[2]}}",
+                    f"{row[3]:>{widths[3]}}",
+                    f"{row[4]:>{widths[4]}}",
+                    f"{row[5]:>{widths[5]}}",
+                ]
+            )
+        )
+    print("-" * len(header))
 
 
 def run_monte_carlo_report() -> None:
     """Run Monte Carlo recall and compare activation or learning mode with mean +/- 95% CI errors."""
     print("\n=== Monte Carlo Recall Report ===")
-    print("Seed policy: base seed = 42")
+    base_seed = read_monte_carlo_base_seed()
+    print(f"Seed policy: base seed = {base_seed}")
 
     training_folder = prompt_for_folder(
         "hopfield.training_folder",
@@ -1220,19 +1356,17 @@ def run_monte_carlo_report() -> None:
         ensure_patterns_dir(),
     )
     if not training_folder.exists() or not training_folder.is_dir():
-        print(f"Folder not found: {training_folder}")
+        print(f"Folder not found: {_folder_label(training_folder)}")
         return
 
-    test_folder = prompt_for_folder(
-        "hopfield.test_folder",
-        "Folder to test",
-        Path(__file__).resolve().parent / DEFAULT_RECALL_TEST_FOLDER,
+    reference_folder = prompt_for_folder(
+        "hopfield.reference_folder",
+        "Reference folder for Monte Carlo",
+        training_folder,
     )
-    if not test_folder.exists() or not test_folder.is_dir():
-        print(f"Folder not found: {test_folder}")
+    if not reference_folder.exists() or not reference_folder.is_dir():
+        print(f"Folder not found: {_folder_label(reference_folder)}")
         return
-
-    reference_folder = training_folder
 
     compare_mode = read_monte_carlo_compare_mode()
 
@@ -1249,7 +1383,21 @@ def run_monte_carlo_report() -> None:
 
     recall_mode = read_monte_carlo_recall_mode()
 
+    if compare_mode == "activation" and recall_mode == "HOPA":
+        print(
+            "Note: activation comparison under HOPA is not meaningful in this implementation; "
+            "switching to HOPS for activation comparison."
+        )
+        recall_mode = "HOPS"
+
     run_count = read_monte_carlo_run_count()
+    noise_percent = read_monte_carlo_noise_percent()
+
+    if compare_mode == "activation" and "sign" in comparison_labels and "tanh" in comparison_labels:
+        print(
+            "Note: SIGN and TANH are expected to match in this implementation because TANH "
+            "is projected back to bipolar states using the same zero-threshold rule as SIGN."
+        )
 
     vectors, used_files, grid_shape = load_training_patterns(training_folder)
     if not vectors:
@@ -1289,61 +1437,42 @@ def run_monte_carlo_report() -> None:
             train_network(network, vectors, learning_mode, label=f"MC-{_learning_mode_abbrev(learning_mode)}")
         networks[label] = network
 
-    test_files = sorted(
-        test_folder.glob("*.png"),
+    reference_files = sorted(
+        reference_folder.glob("*.png"),
         key=lambda file_path: file_path.stat().st_mtime,
         reverse=True,
     )[:8]
 
-    if not test_files:
-        print(f"No PNG images found in: {test_folder}")
+    if not reference_files:
+        print(f"No PNG images found in: {_folder_label(reference_folder)}")
         return
 
-    test_cases: list[tuple[str, np.ndarray, np.ndarray]] = []
+    base_cases: list[tuple[str, np.ndarray]] = []
 
-    for test_file in test_files:
-        noisy_grid = load_binary_png_any_size(test_file)
-        if noisy_grid is None:
-            print(f"Skipping {test_file.name}: unable to read as a 2D pattern PNG.")
-            continue
-        if tuple(noisy_grid.shape) != grid_shape:
-            print(
-                f"Skipping {test_file.name}: size {noisy_grid.shape[0]}x{noisy_grid.shape[1]} does not match "
-                f"model size {grid_shape[0]}x{grid_shape[1]}."
-            )
-            continue
-
-        reference_stem = infer_reference_pattern_stem(test_file.stem)
-        reference_path = reference_folder / f"{reference_stem}.png"
-        reference_grid = load_binary_png_any_size(reference_path)
+    for reference_file in reference_files:
+        reference_grid = load_binary_png_any_size(reference_file)
         if reference_grid is None:
-            print(f"Skipping {test_file.name}: reference pattern not found/invalid ({reference_path.name}).")
+            print(f"Skipping {reference_file.name}: unable to read as a 2D pattern PNG.")
             continue
         if tuple(reference_grid.shape) != grid_shape:
             print(
-                f"Skipping {test_file.name}: reference size {reference_grid.shape[0]}x{reference_grid.shape[1]} does not match "
+                f"Skipping {reference_file.name}: size {reference_grid.shape[0]}x{reference_grid.shape[1]} does not match "
                 f"model size {grid_shape[0]}x{grid_shape[1]}."
             )
             continue
 
-        test_cases.append(
-            (
-                test_file.name,
-                np.where(noisy_grid.reshape(-1) == 1, 1, -1),
-                reference_grid,
-            )
-        )
+        base_cases.append((reference_file.name, np.asarray(reference_grid, dtype=np.uint8)))
 
-    if not test_cases:
+    if not base_cases:
         print("No valid files to evaluate.")
         return
 
     print(
-        f"Running Monte Carlo: runs={run_count}, files={len(test_cases)}, "
-        f"columns={len(comparison_labels)}"
+        f"Running Monte Carlo: runs={run_count}, files={len(base_cases)}, "
+        f"columns={len(comparison_labels)}, noise={noise_percent:.1f}%"
     )
 
-    row_names = [file_name for file_name, _, _ in test_cases]
+    row_names = [file_name for file_name, _ in base_cases]
     row_names.append("FOLDER_TOTAL")
     errors_by_column: dict[str, dict[str, list[float]]] = {
         label: {row_name: [] for row_name in row_names}
@@ -1352,12 +1481,19 @@ def run_monte_carlo_report() -> None:
 
     for run_index in range(run_count):
         print(f"[MC] Run {run_index + 1}/{run_count}")
+        run_noise_rng = np.random.default_rng(base_seed + run_index)
+        run_cases: list[tuple[str, np.ndarray, np.ndarray]] = []
+        for file_name, reference_grid in base_cases:
+            noisy_grid = _apply_noise_to_grid_with_rng(reference_grid, noise_percent, run_noise_rng)
+            noisy_vector = np.where(noisy_grid.reshape(-1) == 1, 1, -1)
+            run_cases.append((file_name, noisy_vector, reference_grid))
+
         for label_index, label in enumerate(comparison_labels):
-            run_seed = 42 + (run_index * 1000) + label_index
+            run_seed = base_seed + (run_index * 1000) + label_index
             run_rng = np.random.default_rng(run_seed)
             run_total_errors = 0
 
-            for file_name, noisy_vector, reference_grid in test_cases:
+            for file_name, noisy_vector, reference_grid in run_cases:
                 if recall_mode == "HOPS":
                     recalled = networks[label].recall_synchronous(noisy_vector, steps=1)
                 else:
@@ -1412,7 +1548,10 @@ def run_monte_carlo_report() -> None:
     else:
         fixed_text = f"ACT={(fixed_activation if fixed_activation is not None else DEFAULT_ACTIVATION).upper()}"
         compare_text = "CMP=LRN"
-    title_info = f"{compare_text} | RCL={recall_mode} | {fixed_text} | RUNS={run_count} | FILES={len(test_cases)}"
+    title_info = (
+        f"{compare_text} | RCL={recall_mode} | {fixed_text} | "
+        f"RUNS={run_count} | FILES={len(base_cases)} | NOISE={noise_percent:.1f}%"
+    )
     title_border = "=" * max(len(title_main), len(title_info), len(header))
 
     print(title_border)
@@ -1459,7 +1598,7 @@ def run_recall_error_report() -> None:
     )
 
     if not patterns_folder.exists() or not patterns_folder.is_dir():
-        print(f"Folder not found: {patterns_folder}")
+        print(f"Folder not found: {_folder_label(patterns_folder)}")
         return
 
     rows: list[tuple[str, str, str]] = []
@@ -1537,8 +1676,8 @@ def run_recall_error_report() -> None:
     else:
         print("HOPA: trained (metadata unavailable)")
 
-    print(f"Test Folder: {test_folder}")
-    print(f"Reference Folder: {patterns_folder}")
+    print(f"Test Folder: {_folder_label(test_folder)}")
+    print(f"Reference Folder: {_folder_label(patterns_folder)}")
 
     header = f"{'File':<{file_col_width}}  {'HOPA':>{hopa_col_width}}  {'HOPS':>{hops_col_width}}"
     print(header)
